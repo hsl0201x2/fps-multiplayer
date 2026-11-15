@@ -57,6 +57,7 @@ function publicPlayers(lobby) {
     hp: p.hp,
     alive: p.alive,
     readyAgain: lobby.ready.has(p.id),
+    stats: { kills: p.kills || 0, deaths: p.deaths || 0, damage: Math.round(p.damage || 0) },
     stale: Date.now() - p.updatedAt > STALE_MS,
   }));
 }
@@ -106,6 +107,9 @@ const NEXT_ROUND_DELAY_MS = 4500;
 function startRound(lobby) {
   clearTimeout(lobby.nextRoundTimer);
   lobby.nextRoundTimer = null;
+  if (lobby.round === 0) {   // first round of a match: fresh leaderboard
+    for (const p of lobby.players.values()) { p.kills = 0; p.deaths = 0; p.damage = 0; }
+  }
   lobby.phase = "playing";
   lobby.round += 1;
   // Every client uses the same seeds, so everyone builds the identical map and
@@ -232,6 +236,9 @@ async function addToLobby(socket, code, profile) {
     team: null,
     hp: 100,
     alive: true,
+    kills: 0,
+    deaths: 0,
+    damage: 0,
     updatedAt: Date.now(),
   });
 
@@ -471,8 +478,17 @@ io.on("connection", (socket) => {
     const value = Number(damage);
     if (!Number.isFinite(value) || value <= 0) return;
     const amount = Math.min(120, value);
+    shooter.damage += Math.min(target.hp, amount);
     target.hp = Math.max(0, target.hp - amount);
     target.alive = target.hp > 0;
+    if (!target.alive) {
+      shooter.kills += 1;
+      target.deaths += 1;
+      io.to(lobby.code).emit("match:kill", {
+        killer: shooter.profile.username, killerTeam: shooter.team,
+        victim: target.profile.username, victimTeam: target.team,
+      });
+    }
     sendLobby(lobby);
 
     if (!target.alive) {
@@ -488,6 +504,8 @@ io.on("connection", (socket) => {
     if (!lobby || lobby.phase !== "playing" || !p?.alive) return;
     p.hp = 0;
     p.alive = false;
+    p.deaths += 1;
+    io.to(lobby.code).emit("match:kill", { killer: null, killerTeam: null, victim: p.profile.username, victimTeam: p.team, fell: true });
     sendLobby(lobby);
     const mates = [...lobby.players.values()].filter((q) => q.team === p.team && q.alive);
     if (!mates.length) finishRound(lobby, p.team === "red" ? "blue" : "red");
