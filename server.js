@@ -57,6 +57,8 @@ function publicPlayers(lobby) {
     hp: p.hp,
     alive: p.alive,
     readyAgain: lobby.ready.has(p.id),
+    loadoutReady: lobby.loadoutReady.has(p.id),
+    loadout: p.loadout || [],
     stats: { kills: p.kills || 0, deaths: p.deaths || 0, damage: Math.round(p.damage || 0) },
     stale: Date.now() - p.updatedAt > STALE_MS,
   }));
@@ -72,12 +74,24 @@ function lobbyState(lobby) {
     round: lobby.round,
     wins: lobby.wins,
     readyCount: lobby.ready.size,
+    loadoutMsLeft: lobby.phase === "loadout" ? Math.max(0, lobby.loadoutEndsAt - Date.now()) : 0,
+    loadoutTotalMs: LOADOUT_MS,
     mapSeed: lobby.mapSeed || 0,
     spawnSeed: lobby.spawnSeed || 0,
     spawnOrder: lobby.roundSpawnOrder || [],
     draft: lobby.draft || null,
     players: publicPlayers(lobby),
   };
+}
+
+function teamCounts(lobby) {
+  const c = { red: { alive: 0, total: 0 }, blue: { alive: 0, total: 0 } };
+  for (const p of lobby.players.values()) {
+    if (!c[p.team]) continue;
+    c[p.team].total += 1;
+    if (p.alive) c[p.team].alive += 1;
+  }
+  return c;
 }
 
 function sendLobby(lobby) {
@@ -102,7 +116,75 @@ function safeProfile(request) {
   return { profile: cleanProfile(raw), ownerKey: profileOwnerKey(raw) };
 }
 
-const NEXT_ROUND_DELAY_MS = 4500;
+const LOADOUT_MS = 30000;
+const WEAPON_IDS = new Set([1, 2, 3, 4, 5, 6]);
+const DEFAULT_LOADOUT = [2, 4];
+
+function cleanLoadout(raw) {
+  const out = [];
+  for (const id of Array.isArray(raw) ? raw : []) {
+    const n = Number(id);
+    if (WEAPON_IDS.has(n) && !out.includes(n)) out.push(n);
+    if (out.length === 2) break;
+  }
+  return out;
+}
+
+function beginLoadout(lobby) {
+  clearTimeout(lobby.loadoutTimer);
+  clearTimeout(lobby.nextRoundTimer);
+  lobby.phase = "loadout";
+  lobby.round = 0;
+  lobby.wins = { red: 0, blue: 0 };
+  lobby.ready.clear();
+  lobby.loadoutReady.clear();
+  lobby.mapSeed = randomInt(1, 0x7fffffff);
+  for (const p of lobby.players.values()) p.loadout = [];
+  lobby.loadoutEndsAt = Date.now() + LOADOUT_MS;
+  lobby.loadoutTimer = setTimeout(() => endLoadout(lobby), LOADOUT_MS + 250);
+  sendLobby(lobby);
+}
+
+function endLoadout(lobby) {
+  if (lobbies.get(lobby.code) !== lobby || lobby.phase !== "loadout") return;
+  clearTimeout(lobby.loadoutTimer);
+  lobby.loadoutTimer = null;
+  for (const p of lobby.players.values()) {
+    const l = cleanLoadout(p.loadout);
+    for (const d of DEFAULT_LOADOUT) if (l.length < 2 && !l.includes(d)) l.push(d);
+    p.loadout = l;
+  }
+  lobby.loadoutReady.clear();
+  startRound(lobby);
+}
+
+function checkLoadoutReady(lobby) {
+  if (lobby.phase !== "loadout" || !lobby.players.size) return;
+  const allReady = [...lobby.players.keys()].every((id) => lobby.loadoutReady.has(id));
+  if (allReady) endLoadout(lobby);
+}
+
+function teamsPresent(lobby) {
+  const teams = new Set([...lobby.players.values()].map((p) => p.team));
+  return { red: teams.has("red"), blue: teams.has("blue") };
+}
+
+// Between rounds everyone must press READY; the next round starts when all have.
+function checkRoundReady(lobby) {
+  if (lobby.phase !== "round-result" || !lobby.players.size) return;
+  const t = teamsPresent(lobby);
+  if (!t.red || !t.blue) {
+    // a whole team left: the remaining team wins the match
+    const remaining = t.red ? "red" : "blue";
+    lobby.wins[remaining] = Math.max(lobby.wins[remaining], Math.floor(lobby.config.rounds / 2) + 1);
+    lobby.phase = "match-result";
+    lobby.ready.clear();
+    io.to(lobby.code).emit("match:result", { state: lobbyState(lobby), winningTeam: remaining, roundWinner: remaining, matchOver: true, needReady: false });
+    sendLobby(lobby);
+    return;
+  }
+  if ([...lobby.players.keys()].every((id) => lobby.ready.has(id))) startRound(lobby);
+}
 
 function startRound(lobby) {
   clearTimeout(lobby.nextRoundTimer);
@@ -110,6 +192,7 @@ function startRound(lobby) {
   if (lobby.round === 0) {   // first round of a match: fresh leaderboard
     for (const p of lobby.players.values()) { p.kills = 0; p.deaths = 0; p.damage = 0; }
   }
+  lobby.ready.clear();
   lobby.phase = "playing";
   lobby.round += 1;
   // Every client uses the same seeds, so everyone builds the identical map and
@@ -148,30 +231,15 @@ function finishRound(lobby, winningTeam) {
     ? winningTeam
     : lobby.wins.red > lobby.wins.blue ? "red" : "blue";
 
+  lobby.ready.clear();
   io.to(lobby.code).emit("match:result", {
     state: lobbyState(lobby),
     winningTeam: matchOver ? matchWinner : winningTeam,
     roundWinner: winningTeam,
     matchOver,
-    nextRoundIn: matchOver ? 0 : NEXT_ROUND_DELAY_MS,
+    needReady: !matchOver,
   });
   sendLobby(lobby);
-
-  clearTimeout(lobby.nextRoundTimer);
-  if (!matchOver) {
-    lobby.nextRoundTimer = setTimeout(() => {
-      lobby.nextRoundTimer = null;
-      if (lobbies.get(lobby.code) !== lobby || lobby.phase !== "round-result") return;
-      const teams = new Set([...lobby.players.values()].map((p) => p.team));
-      if (teams.has("red") && teams.has("blue")) return startRound(lobby);
-      // a whole team left: the remaining team wins the match
-      const remaining = teams.has("red") ? "red" : "blue";
-      lobby.wins[remaining] = Math.max(lobby.wins[remaining], Math.floor(lobby.config.rounds / 2) + 1);
-      lobby.phase = "match-result";
-      io.to(lobby.code).emit("match:result", { state: lobbyState(lobby), winningTeam: remaining, roundWinner: remaining, matchOver: true, nextRoundIn: 0 });
-      sendLobby(lobby);
-    }, NEXT_ROUND_DELAY_MS);
-  }
 }
 
 async function leaveLobby(socket) {
@@ -185,6 +253,7 @@ async function leaveLobby(socket) {
 
   if (!lobby.players.size) {
     clearTimeout(lobby.nextRoundTimer);
+    clearTimeout(lobby.loadoutTimer);
     lobbies.delete(lobby.code);
     return;
   }
@@ -196,6 +265,9 @@ async function leaveLobby(socket) {
   }
   sendLobby(lobby);
   io.to(lobby.code).emit("player:disconnected", socket.id);
+  lobby.loadoutReady.delete(socket.id);
+  if (lobby.phase === "loadout") checkLoadoutReady(lobby);
+  if (lobby.phase === "round-result") checkRoundReady(lobby);
   if (lobby.phase === "playing") {
     const redAlive = [...lobby.players.values()].some((player) => player.team === "red" && player.alive);
     const blueAlive = [...lobby.players.values()].some((player) => player.team === "blue" && player.alive);
@@ -219,6 +291,8 @@ async function addToLobby(socket, code, profile) {
       round: 0,
       wins: { red: 0, blue: 0 },
       ready: new Set(),
+      loadoutReady: new Set(),
+      loadoutEndsAt: 0,
     };
     lobbies.set(code, lobby);
   }
@@ -244,7 +318,8 @@ async function addToLobby(socket, code, profile) {
 
   lobbyBySocketId.set(socket.id, code);
   await socket.join(code);
-  if (profile.ownerKey && lobby.hostKey === profile.ownerKey) lobby.hostId = socket.id;
+  // NOTE: host is only ever the lobby creator (or the next player if the host leaves).
+  // The old ownerKey check handed host to anyone sharing the creator's browser storage.
   sendLobby(lobby);
   return lobby;
 }
@@ -278,7 +353,7 @@ io.on("connection", (socket) => {
     }
     try {
       const profile = safeProfile(request);
-      if (["versus-ready", "playing", "round-result", "match-result"].includes(lobby.phase)) {
+      if (["versus-ready", "loadout", "playing", "round-result", "match-result"].includes(lobby.phase)) {
         return ack(callback, { ok: false, error: "This lobby is not accepting players during a match." });
       }
       const joined = await addToLobby(socket, code, profile);
@@ -299,7 +374,6 @@ io.on("connection", (socket) => {
     if (!player) return;
     player.profile = cleanProfile(profile);
     player.ownerKey = profileOwnerKey(profile);
-    if (player.ownerKey && player.ownerKey === lobby.hostKey) lobby.hostId = socket.id;
     sendLobby(lobby);
   });
 
@@ -407,28 +481,39 @@ io.on("connection", (socket) => {
         ![...lobby.players.values()].some((player) => player.team === "blue")) {
       return ack(callback, { ok: false, error: "Assign at least one player to each team before starting." });
     }
-    lobby.wins = { red: 0, blue: 0 };
-    lobby.round = 0;
-    lobby.ready.clear();
-    startRound(lobby);
+    beginLoadout(lobby);
     ack(callback, { ok: true, state: lobbyState(lobby) });
   });
 
-  socket.on("match:next-round", (_data, callback) => {
+  // Loadout screen: players send their (up to) 2 weapons and a ready flag.
+  socket.on("loadout:set", (data = {}) => {
     const lobby = getLobby(socket);
-    if (!lobby || lobby.hostId !== socket.id || lobby.phase !== "round-result") {
-      return ack(callback, { ok: false, error: "Only the host can start the next round." });
-    }
-    startRound(lobby);
-    ack(callback, { ok: true, state: lobbyState(lobby) });
+    const player = lobby?.players.get(socket.id);
+    if (!lobby || !player || lobby.phase !== "loadout") return;
+    player.loadout = cleanLoadout(data.weapons);
+    if (data.ready && player.loadout.length === 2) lobby.loadoutReady.add(socket.id);
+    else lobby.loadoutReady.delete(socket.id);
+    sendLobby(lobby);
+    checkLoadoutReady(lobby);
   });
 
-  socket.on("match:ready", () => {
+  // End of round: every player clicks READY; the next round starts once all have.
+  // (At match end it just marks you as wanting to play again.)
+  socket.on("match:ready", (_d, callback) => {
     const lobby = getLobby(socket);
-    if (lobby && lobby.phase === "match-result" && lobby.players.has(socket.id)) {
+    if (!lobby || !lobby.players.has(socket.id)) return ack(callback, { ok: false });
+    if (lobby.phase === "round-result") {
       lobby.ready.add(socket.id);
       sendLobby(lobby);
+      checkRoundReady(lobby);
+      return ack(callback, { ok: true });
     }
+    if (lobby.phase === "match-result") {
+      lobby.ready.add(socket.id);
+      sendLobby(lobby);
+      return ack(callback, { ok: true });
+    }
+    ack(callback, { ok: false });
   });
 
   socket.on("match:play-again", (_data, callback) => {
@@ -439,11 +524,7 @@ io.on("connection", (socket) => {
     if (lobby.players.size < 2) {
       return ack(callback, { ok: false, error: "At least two players are needed to play again." });
     }
-    lobby.wins = { red: 0, blue: 0 };
-    lobby.round = 0;
-    lobby.ready.clear();
-    lobby.mapSeed = randomInt(1, 0x7fffffff);
-    startRound(lobby);
+    beginLoadout(lobby);   // new match: everyone picks weapons again
     ack(callback, { ok: true, state: lobbyState(lobby) });
   });
 
@@ -487,6 +568,7 @@ io.on("connection", (socket) => {
       io.to(lobby.code).emit("match:kill", {
         killer: shooter.profile.username, killerTeam: shooter.team,
         victim: target.profile.username, victimTeam: target.team,
+        counts: teamCounts(lobby),
       });
     }
     sendLobby(lobby);
@@ -505,7 +587,7 @@ io.on("connection", (socket) => {
     p.hp = 0;
     p.alive = false;
     p.deaths += 1;
-    io.to(lobby.code).emit("match:kill", { killer: null, killerTeam: null, victim: p.profile.username, victimTeam: p.team, fell: true });
+    io.to(lobby.code).emit("match:kill", { killer: null, killerTeam: null, victim: p.profile.username, victimTeam: p.team, fell: true, counts: teamCounts(lobby) });
     sendLobby(lobby);
     const mates = [...lobby.players.values()].filter((q) => q.team === p.team && q.alive);
     if (!mates.length) finishRound(lobby, p.team === "red" ? "blue" : "red");
