@@ -528,10 +528,11 @@
   .lobbyCard p { margin:0; color:#bdc7d4; line-height:1.5; }
   .lobbyCard label { font-weight:800; }
   .lobbyCard input {
-    width:100%; padding:12px 14px; border-radius:10px; border:1px solid rgba(255,255,255,.2);
-    background:rgba(0,0,0,.32); color:#fff; font:800 20px ui-monospace, monospace; letter-spacing:3px;
-    text-transform:uppercase;
+    box-sizing:border-box; width:100%; padding:12px 14px 12px calc(14px + 6px); border-radius:10px; border:1px solid rgba(255,255,255,.2);
+    background:rgba(0,0,0,.32); color:#fff; font:800 20px ui-monospace, monospace; letter-spacing:6px;
+    text-transform:uppercase; text-align:center;
   }
+  .lobbyCard input::placeholder { letter-spacing:6px; text-align:center; }
   .lobbyBtn, .lobbySmallBtn {
     cursor:pointer; border:1px solid rgba(255,255,255,.16); border-radius:10px;
     background:rgba(255,255,255,.08); color:#e9eef5; font:800 14px system-ui, Arial, sans-serif;
@@ -547,7 +548,7 @@
     text-align:center;
   }
   #lobbyActive .lobbyCodeLabel { color:#c5d3cc; font-size:12px; text-transform:uppercase; letter-spacing:2px; }
-  #lobbyCodeDisplay { color:#4dff88; font:900 36px ui-monospace, monospace; letter-spacing:7px; }
+  #lobbyCodeDisplay { color:#4dff88; font:900 36px ui-monospace, monospace; letter-spacing:7px; padding-left:7px; text-align:center; }
   #lobbyPlayerCount { color:#dce8e0; }
   .lobbyButtonRow { display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
 
@@ -11641,7 +11642,7 @@ function addEventListeners() {
       jumpQueued = false;
       if (roundActive && window.__fpsVersusActive) window.dispatchEvent(new Event("fps-versus-pause"));
       else if (roundActive) showMenu("pause");
-      else if (!dying) overlayEl.style.display = "flex";   // death screen replaces the menu while dying
+      else if (!dying && !window.__fpsHoldOverlay) overlayEl.style.display = "flex";   // death screen replaces the menu while dying
     }
   });
 
@@ -12675,8 +12676,11 @@ initDeathScreen();
 #mpModal.win{--bg:radial-gradient(ellipse 70% 60% at 0% 0%,#10566e,transparent 60%),linear-gradient(180deg,#04090e,#02050a)}
 #mpModal.loss{--bg:radial-gradient(ellipse 70% 60% at 0% 0%,#78241a,transparent 60%),linear-gradient(180deg,#0a0504,#040202)}
 #mpModal.draw{--bg:radial-gradient(ellipse 70% 60% at 0% 0%,#6e5a14,transparent 60%),linear-gradient(180deg,#090804,#030302)}
+#mpModal.splash.win{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#0c3342 0%,#07202b 45%,#03080d 100%)}
+#mpModal.splash.draw{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#4a3c12 0%,#241d0a 45%,#070603 100%)}
 #mpModal.splash.loss{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#4a1a12 0%,#2a0f0b 45%,#070302 100%)}
 #mpModal.win::before,#mpModal.loss::before,#mpModal.draw::before{opacity:.9}
+#mpModal.splash.win::before,#mpModal.splash.loss::before,#mpModal.splash.draw::before{opacity:.7}
 #mpModal.screen{--bg:linear-gradient(135deg,#0d1118 0%,#080a10 55%,#05070b 100%)}
 #mpModal.screen::after{content:"";position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(135deg,rgba(255,176,46,.035) 0 2px,transparent 2px 16px)}
 #mpModal.screen.pause{backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
@@ -12963,6 +12967,7 @@ initDeathScreen();
     clearInterval(countdownTimer);clearTimeout(stageTimer);mpPaused=false;matchStage=0;
     window.__fpsVersusActive=false;window.__fpsLocalTeam=null;PLAYER_MAX_HP=100;
     roundActive=false;document.exitPointerLock?.();
+    window.__fpsHoldOverlay=false;
     if(savedHotbar){hotbar=savedHotbar;savedHotbar=null;updateHotbarHud();}
     ldBuilt=false;clearInterval(ldTick);cntEl.classList.remove("show");
     if(savedSolo){settings.map=savedSolo.map;settings.mode=savedSolo.mode;settings.sandbox=savedSolo.sandbox;savedSolo=null;}
@@ -12971,6 +12976,7 @@ initDeathScreen();
     const r=$("lobbyRoster");if(r)r.innerHTML="";
     clearLobbyState();
     deathBackToMenu();            // rebuilds the preview map and shows the first menu
+    overlayEl.style.display="flex";
     setMenuStage("multiplayer");
     setLobbyStatus("You left the lobby.");
   }
@@ -13171,7 +13177,7 @@ initDeathScreen();
   function showResult(data){
     const r=resultInfo(data);
     clearInterval(countdownTimer);hideBanner();hudEl.hidden=true;
-    show(`<div class="spl ${r.kind}" id="mpSplash"><div class="splT" data-t="${r.title}">${r.title}<div class="splD"><i></i><i></i><i></i></div></div></div>`,"splash");
+    show(`<div class="spl ${r.kind}" id="mpSplash"><div class="splT" data-t="${r.title}">${r.title}<div class="splD"><i></i><i></i><i></i></div></div></div>`,"splash "+r.kind);
     $("mpSplash").addEventListener("click",()=>goScore());
     clearTimeout(stageTimer);stageTimer=setTimeout(goScore,2300);
   }
@@ -13271,6 +13277,7 @@ initDeathScreen();
     clearEnemies();clearTracers();
     withSeededRandom(state.mapSeed||1,()=>buildMap(cfg.map));   // identical layout on every client
     runMap=cfg.map;runKey=selectionKey();
+    window.__fpsHoldOverlay=false;
     const myLo=(self?.loadout||[]).filter(id=>weapons[id]);
     if(myLo.length){if(!savedHotbar)savedHotbar=hotbar.slice();hotbar=[myLo[0],myLo[1]??null,null];}
     updateHotbarHud();
@@ -13321,6 +13328,7 @@ initDeathScreen();
   multiplayerSocket.on("match:kill",addKill);
   multiplayerSocket.on("match:result",data=>{
     mpResult=data;mpState=data.state;roundActive=false;window.__fpsVersusActive=false;mpPaused=false;matchStage=0;
+    window.__fpsHoldOverlay=true;overlayEl.style.display="none";   // keep the live game view (your own camera) behind the result screens
     document.exitPointerLock?.();
     cntEl.classList.remove("show");
     showResult(data);   // title card first, then the scoreboard
