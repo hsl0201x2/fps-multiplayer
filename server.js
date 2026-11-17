@@ -22,6 +22,7 @@ const CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 const MAX_PLAYERS = 8;
 const MAX_POSITION = 10000;
 const STALE_MS = 15000;
+const PLAYER_FALL_MS = 800;
 
 function cleanProfile(raw = {}) {
   const username = String(raw.username || "Player")
@@ -133,6 +134,9 @@ function cleanLoadout(raw) {
 function beginLoadout(lobby) {
   clearTimeout(lobby.loadoutTimer);
   clearTimeout(lobby.nextRoundTimer);
+  clearTimeout(lobby.roundResultTimer);
+  lobby.roundResultTimer = null;
+  lobby.pendingRoundWinner = null;
   lobby.phase = "loadout";
   lobby.round = 0;
   lobby.wins = { red: 0, blue: 0 };
@@ -189,6 +193,9 @@ function checkRoundReady(lobby) {
 function startRound(lobby) {
   clearTimeout(lobby.nextRoundTimer);
   lobby.nextRoundTimer = null;
+  clearTimeout(lobby.roundResultTimer);
+  lobby.roundResultTimer = null;
+  lobby.pendingRoundWinner = null;
   if (lobby.round === 0) {   // first round of a match: fresh leaderboard
     for (const p of lobby.players.values()) { p.kills = 0; p.deaths = 0; p.damage = 0; }
   }
@@ -217,6 +224,9 @@ function startRound(lobby) {
 
 function finishRound(lobby, winningTeam) {
   if (lobby.phase !== "playing") return;
+  clearTimeout(lobby.roundResultTimer);
+  lobby.roundResultTimer = null;
+  lobby.pendingRoundWinner = null;
   lobby.phase = "round-result";
   if (winningTeam) lobby.wins[winningTeam] += 1;
 
@@ -242,6 +252,18 @@ function finishRound(lobby, winningTeam) {
   sendLobby(lobby);
 }
 
+function finishRoundAfterFall(lobby, winningTeam) {
+  if (lobby.phase !== "playing" || lobby.roundResultTimer) return;
+  lobby.pendingRoundWinner = winningTeam;
+  lobby.roundResultTimer = setTimeout(() => {
+    lobby.roundResultTimer = null;
+    if (lobbies.get(lobby.code) !== lobby || lobby.phase !== "playing") return;
+    const winner = lobby.pendingRoundWinner;
+    lobby.pendingRoundWinner = null;
+    finishRound(lobby, winner);
+  }, PLAYER_FALL_MS);
+}
+
 async function leaveLobby(socket) {
   const lobby = getLobby(socket);
   if (!lobby) return;
@@ -254,6 +276,7 @@ async function leaveLobby(socket) {
   if (!lobby.players.size) {
     clearTimeout(lobby.nextRoundTimer);
     clearTimeout(lobby.loadoutTimer);
+    clearTimeout(lobby.roundResultTimer);
     lobbies.delete(lobby.code);
     return;
   }
@@ -271,7 +294,9 @@ async function leaveLobby(socket) {
   if (lobby.phase === "playing") {
     const redAlive = [...lobby.players.values()].some((player) => player.team === "red" && player.alive);
     const blueAlive = [...lobby.players.values()].some((player) => player.team === "blue" && player.alive);
-    if (!redAlive || !blueAlive) finishRound(lobby, redAlive ? "red" : blueAlive ? "blue" : null);
+    if ((!redAlive || !blueAlive) && !lobby.roundResultTimer) {
+      finishRound(lobby, redAlive ? "red" : blueAlive ? "blue" : null);
+    }
   }
 }
 
@@ -575,7 +600,7 @@ io.on("connection", (socket) => {
 
     if (!target.alive) {
       const remaining = [...lobby.players.values()].filter((p) => p.team === target.team && p.alive);
-      if (!remaining.length) finishRound(lobby, shooter.team);
+      if (!remaining.length) finishRoundAfterFall(lobby, shooter.team);
     }
   });
 
@@ -590,7 +615,7 @@ io.on("connection", (socket) => {
     io.to(lobby.code).emit("match:kill", { killer: null, killerTeam: null, victim: p.profile.username, victimTeam: p.team, fell: true, counts: teamCounts(lobby) });
     sendLobby(lobby);
     const mates = [...lobby.players.values()].filter((q) => q.team === p.team && q.alive);
-    if (!mates.length) finishRound(lobby, p.team === "red" ? "blue" : "red");
+    if (!mates.length) finishRoundAfterFall(lobby, p.team === "red" ? "blue" : "red");
   });
 
   socket.on("disconnect", () => {
