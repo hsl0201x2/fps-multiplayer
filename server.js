@@ -152,6 +152,7 @@ function beginLoadout(lobby) {
   lobby.ready.clear();
   lobby.loadoutReady.clear();
   lobby.mapSeed = randomInt(1, 0x7fffffff);
+  lobby.utilityProjectiles?.clear();
   for (const p of lobby.players.values()) { p.loadout = []; p.utility = cleanUtility(p.utility); }
   lobby.loadoutEndsAt = Date.now() + LOADOUT_MS;
   lobby.loadoutTimer = setTimeout(() => endLoadout(lobby), LOADOUT_MS + 250);
@@ -209,6 +210,7 @@ function startRound(lobby) {
   lobby.ready.clear();
   lobby.phase = "playing";
   lobby.round += 1;
+  lobby.utilityProjectiles?.clear();
   // Every client uses the same seeds, so everyone builds the identical map and
   // computes the identical set of spawn slots. Slot order is shuffled per round.
   lobby.mapSeed = lobby.mapSeed || randomInt(1, 0x7fffffff);
@@ -326,6 +328,7 @@ async function addToLobby(socket, code, profile) {
       wins: { red: 0, blue: 0 },
       ready: new Set(),
       loadoutReady: new Set(),
+      utilityProjectiles: new Map(),
       loadoutEndsAt: 0,
     };
     lobbies.set(code, lobby);
@@ -593,21 +596,49 @@ io.on("connection", (socket) => {
     const type = data.type;
     const position = data.position;
     const velocity = data.velocity;
+    const projectileId = typeof data.projectileId === "string" ? data.projectileId : "";
     const fuseByType = { frag: 1.9, flash: 0.9, smoke: 1.0 };
     if (!UTILITY_IDS.has(type) || type !== player.utility || player.utilityAmmo <= 0) return;
-    if (!position || !velocity) return;
+    if (!/^[a-zA-Z0-9:_-]{1,96}$/.test(projectileId) || !position || !velocity) return;
     const pos = [position.x, position.y, position.z];
     const vel = [velocity.x, velocity.y, velocity.z];
     if (![...pos, ...vel].every(Number.isFinite) || pos.some((n) => Math.abs(n) > MAX_POSITION)) return;
     if (Math.hypot(...vel) > 80 || Date.now() < player.utilityCooldownUntil || Date.now() - player.lastUtilityAt < 300) return;
+    if (!(lobby.utilityProjectiles instanceof Map)) lobby.utilityProjectiles = new Map();
+    for (const [id, projectile] of lobby.utilityProjectiles) {
+      if (projectile.expiresAt <= Date.now()) lobby.utilityProjectiles.delete(id);
+    }
+    if (lobby.utilityProjectiles.has(projectileId)) return;
     player.utilityAmmo -= 1;
     player.lastUtilityAt = Date.now();
     player.utilityCooldownUntil = Date.now() + (type === "frag" ? 15000 : 12000);
+    lobby.utilityProjectiles.set(projectileId, { ownerId: socket.id, type, expiresAt: Date.now() + 8000, shotInteractionUsed: false });
     socket.to(lobby.code).emit("match:utility", {
-      playerId: socket.id, type,
+      playerId: socket.id, projectileId, type,
       position: { x: position.x, y: position.y, z: position.z },
       velocity: { x: velocity.x, y: velocity.y, z: velocity.z },
       fuse: fuseByType[type], serverTime: Date.now(),
+    });
+  });
+
+  socket.on("match:utility-hit", (data = {}) => {
+    const lobby = getLobby(socket);
+    const shooter = lobby?.players.get(socket.id);
+    const projectileId = typeof data.projectileId === "string" ? data.projectileId : "";
+    const weaponId = Number(data.weaponId);
+    const direction = data.direction;
+    const projectile = lobby?.utilityProjectiles?.get(projectileId);
+    if (!lobby || lobby.phase !== "playing" || !shooter?.alive || !projectile || projectile.expiresAt <= Date.now()) return;
+    if ((weaponId !== 1 && weaponId !== 3) || !shooter.loadout?.includes(weaponId)) return;
+    if (!direction || ![direction.x, direction.y, direction.z].every(Number.isFinite)) return;
+    const magnitude = Math.hypot(direction.x, direction.y, direction.z);
+    if (magnitude < 0.5 || magnitude > 1.5 || projectile.shotInteractionUsed) return;
+    const action = weaponId === 1 ? "detonate" : "boost";
+    projectile.shotInteractionUsed = true;
+    if (action === "detonate") lobby.utilityProjectiles.delete(projectileId);
+    io.to(lobby.code).emit("match:utility-hit", {
+      projectileId, shooterId: socket.id, weaponId, action,
+      direction: { x: direction.x / magnitude, y: direction.y / magnitude, z: direction.z / magnitude },
     });
   });
 
