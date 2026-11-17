@@ -7263,6 +7263,7 @@ let grenadeCooldownUntil = 0;
 let grenadeView = null;       // { group, hand, nade }: the grenade and hand you see in first person
 let grenadeEquipped = false;
 const liveGrenades = [];      // grenades in flight / rolling, waiting for the fuse
+let utilityProjectileSeq = 0;
 const blasts = [];            // explosion visuals
 
 // Pineapple-style grenade: body, grooves, fuse head, spoon lever and pin ring. `s` scales it.
@@ -7611,17 +7612,18 @@ function releaseGrenade() {
   mesh.traverse(o => { if (o.isMesh) o.castShadow = true; });
   scene.add(mesh);
 
-  liveGrenades.push({
-    mesh, led,
-    vel: launchVelocity,
-    fuse: utility.fuse,
-    type: thrownType,
+  const networkId = window.__fpsVersusActive && multiplayerSocket?.connected
+    ? `${multiplayerSocket.id}-${Date.now().toString(36)}-${(++utilityProjectileSeq).toString(36)}` : null;
+  const projectile = {
+    mesh, led, vel: launchVelocity, fuse: utility.fuse, type: thrownType,
     spin: new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize(),
-    lastSfx: -1e9
-  });
-  if (window.__fpsVersusActive && multiplayerSocket?.connected) {
+    lastSfx: -1e9, networkId, visualOnly: false
+  };
+  mesh.userData.liveGrenade = projectile;
+  liveGrenades.push(projectile);
+  if (networkId) {
     multiplayerSocket.emit("match:utility", {
-      type: thrownType,
+      projectileId: networkId, type: thrownType,
       position: { x: start.x, y: start.y, z: start.z },
       velocity: { x: launchVelocity.x, y: launchVelocity.y, z: launchVelocity.z },
     });
@@ -7648,6 +7650,44 @@ function grenadeBounceSfx(g) {
   beep(900, 0.012, "square", 0.025);
 }
 
+const SHOTGUN_GRENADE_BOOST = 32;
+function detonateLiveGrenade(g) {
+  const i=liveGrenades.indexOf(g);
+  if(i<0)return false;
+  const pos=g.mesh.position.clone();
+  disposeGrenadeMesh(g.mesh);
+  liveGrenades.splice(i,1);
+  detonateUtility(pos,g.type,!!g.visualOnly);
+  return true;
+}
+function applyGrenadeShot(g, action, direction) {
+  if(!g||!liveGrenades.includes(g)||g.shotInteractionDone)return false;
+  g.shotInteractionDone=true;g.shotInteractionPending=false;
+  if(action==="detonate")return detonateLiveGrenade(g);
+  if(action==="boost"&&direction){
+    const dir=direction.clone().normalize();
+    g.vel.addScaledVector(dir,SHOTGUN_GRENADE_BOOST);
+    g.detonateOnImpact=true;
+    return true;
+  }
+  return false;
+}
+function requestGrenadeShot(g, weapon, direction) {
+  const weaponId=curWeaponNum;
+  const action=weapon?.type==="sniper"?"detonate":weapon?.type==="shotgun"?"boost":null;
+  if(!g||!action||g.shotInteractionDone||g.shotInteractionPending)return false;
+  if(window.__fpsVersusActive){
+    if(!g.networkId||!multiplayerSocket?.connected)return false;
+    g.shotInteractionPending=true;
+    multiplayerSocket.emit("match:utility-hit",{
+      projectileId:g.networkId,weaponId,
+      direction:{x:direction.x,y:direction.y,z:direction.z}
+    });
+    return true;
+  }
+  return applyGrenadeShot(g,action,direction);
+}
+
 function updateLiveGrenades(dt, visualOnlyOnly=false) {
   if (dt <= 0) return;
   const indoor = !!(MAP_INFO[runMap || activeMapName()] && MAP_INFO[runMap || activeMapName()].indoor);
@@ -7663,25 +7703,30 @@ function updateLiveGrenades(dt, visualOnlyOnly=false) {
     const steps = Math.max(1, Math.ceil(g.vel.length() * dt / 0.2));
     const h = dt / steps;
     for (let s = 0; s < steps; s++) {
+      let touchedSurface = false;
       g.vel.y -= GRENADE.gravity * h;
 
       p.x += g.vel.x * h;
       if (grenadeHitsBox(p) || p.x < -currentBounds.x + GR_R || p.x > currentBounds.x - GR_R) {
+        touchedSurface = true;
         p.x -= g.vel.x * h; g.vel.x *= -bounce; g.vel.z *= 0.85; grenadeBounceSfx(g);
       }
       p.z += g.vel.z * h;
       if (grenadeHitsBox(p) || p.z < currentBounds.zMin + GR_R || p.z > currentBounds.zMax - GR_R) {
+        touchedSurface = true;
         p.z -= g.vel.z * h; g.vel.z *= -bounce; g.vel.x *= 0.85; grenadeBounceSfx(g);
       }
 
       p.y += g.vel.y * h;
       let landed = false;
-      if (grenadeHitsBox(p)) { p.y -= g.vel.y * h; landed = true; }          // landed on (or hit the underside of) a box
-      if (p.y < GR_R) { p.y = GR_R; landed = true; }                          // floor
+      if (grenadeHitsBox(p)) { p.y -= g.vel.y * h; landed = true; touchedSurface = true; }          // landed on (or hit the underside of) a box
+      if (p.y < GR_R) { p.y = GR_R; landed = true; touchedSurface = true; }                          // floor
       if (indoor && p.y > currentBounds.h - GR_R) {                           // ceiling (indoor maps only)
         p.y = currentBounds.h - GR_R;
+        touchedSurface = true;
         if (g.vel.y > 0) g.vel.y = -g.vel.y * bounce;
       }
+      if (g.detonateOnImpact && touchedSurface) { g.fuse = 0; break; }
       if (landed) {
         if (Math.abs(g.vel.y) > 1.5) {
           g.vel.y = -g.vel.y * bounce;
@@ -7700,12 +7745,7 @@ function updateLiveGrenades(dt, visualOnlyOnly=false) {
     g.mesh.rotateOnAxis(g.spin, Math.min(14, speed * 0.9) * dt);
     g.led.visible = Math.sin(g.fuse * (g.fuse < 1 ? 42 : 15)) > 0;
 
-    if (g.fuse <= 0) {
-      const pos = p.clone();
-      disposeGrenadeMesh(g.mesh);
-      liveGrenades.splice(i, 1);
-      detonateUtility(pos, g.type, !!g.visualOnly);
-    }
+    if (g.fuse <= 0) detonateLiveGrenade(g);
   }
 }
 
@@ -9163,11 +9203,15 @@ function castBullet(origin, dir) {
     ? Array.from(remoteAvatarById.values(), a => a.group)
       .filter(group => group.userData.alive !== false && group.userData.team && group.userData.team !== window.__fpsLocalTeam)
     : [];
-  const objects = enemies.concat(remoteTargets, obstacles);
+  const grenadeTargets = liveGrenades.map(g => g.mesh).filter(mesh => mesh?.visible);
+  const objects = enemies.concat(remoteTargets, grenadeTargets, obstacles);
   const hitsArr = raycaster.intersectObjects(objects, true);
 
   for (const h of hitsArr) {
     if (h.object.type === "Sprite") continue;
+    let grenadeRoot=h.object;
+    while(grenadeRoot&&!grenadeRoot.userData.liveGrenade)grenadeRoot=grenadeRoot.parent;
+    if(grenadeRoot?.userData.liveGrenade)return {type:"grenade",grenade:grenadeRoot.userData.liveGrenade,point:h.point,normal:h.face?h.face.normal.clone().transformDirection(h.object.matrixWorld):null};
     if (obstacles.includes(h.object)) return { type: "wall", point: h.point, normal: h.face ? h.face.normal.clone().transformDirection(h.object.matrixWorld) : null };
 
     let obj = h.object;
@@ -9450,6 +9494,7 @@ function shoot() {
   let anyHit = false;
   let anyCrit = false;
   let totalDamage = 0;   // damage this shot actually dealt (drives knockback)
+  const triggeredGrenades = new Set();
 
   for (let p = 0; p < w.pellets; p++) {
     const dir = getShotDirection(w.spread, true);
@@ -9458,6 +9503,13 @@ function shoot() {
     spawnBullet(res.point);
     if (res.normal) addBulletHole(res.point, res.normal, w.pellets > 1 ? 0.6 : 1);
 
+    if (res.type === "grenade") {
+      if (!triggeredGrenades.has(res.grenade)) {
+        triggeredGrenades.add(res.grenade);
+        if (requestGrenadeShot(res.grenade,w,dir)) anyHit=true;
+      }
+      continue;
+    }
     if (res.type === "enemy" && res.enemy?.userData.remotePlayerId) {
       anyHit = true;
       if (window.__fpsVersusActive && res.enemy.userData.team !== window.__fpsLocalTeam) {
@@ -12607,7 +12659,7 @@ initDeathScreen();
       let last = performance.now();
       function frame(now) {
         const dt = Math.min(0.1, Math.max(0.001, (now - last) / 1000)); last = now;
-        if ((!locked || !roundActive) && window.__fpsVersusActive) updateLiveGrenades(dt,true);
+        if ((!locked || !roundActive) && window.__fpsVersusActive) updateLiveGrenades(dt);
         for (const avatar of remoteAvatarById.values()) {
           const g = avatar.group;
           if (!avatar.target || !g.visible) continue;
@@ -12667,8 +12719,15 @@ initDeathScreen();
       scene.add(mesh);
       const vel=new THREE.Vector3(v.x,v.y-GRENADE.gravity*age,v.z);
       const fuse=Math.max(0,data.fuse-age);
-      liveGrenades.push({mesh,led,vel,fuse,type:data.type,spin:new THREE.Vector3(rand(-1,1),rand(-1,1),rand(-1,1)).normalize(),lastSfx:-1e9,visualOnly:true});
-      if(fuse<=0){const i=liveGrenades.length-1;const pos=mesh.position.clone();disposeGrenadeMesh(mesh);liveGrenades.splice(i,1);detonateUtility(pos,data.type,true);}
+      const projectile={mesh,led,vel,fuse,type:data.type,spin:new THREE.Vector3(rand(-1,1),rand(-1,1),rand(-1,1)).normalize(),lastSfx:-1e9,visualOnly:true,networkId:data.projectileId||null};
+      mesh.userData.liveGrenade=projectile;
+      liveGrenades.push(projectile);
+      if(fuse<=0)detonateLiveGrenade(projectile);
+    });
+    multiplayerSocket.on("match:utility-hit", (data = {}) => {
+      const projectile=liveGrenades.find(g=>g.networkId===data.projectileId);
+      if(!projectile||!data.direction||![data.direction.x,data.direction.y,data.direction.z].every(Number.isFinite))return;
+      applyGrenadeShot(projectile,data.action,new THREE.Vector3(data.direction.x,data.direction.y,data.direction.z));
     });
     multiplayerSocket.on("player:disconnected", (playerId) => {
       latestPlayersSnapshot = latestPlayersSnapshot.filter((player) => player?.id !== playerId);
