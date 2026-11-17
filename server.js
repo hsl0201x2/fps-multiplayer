@@ -60,6 +60,7 @@ function publicPlayers(lobby) {
     readyAgain: lobby.ready.has(p.id),
     loadoutReady: lobby.loadoutReady.has(p.id),
     loadout: p.loadout || [],
+    utility: p.utility || "frag",
     stats: { kills: p.kills || 0, deaths: p.deaths || 0, damage: Math.round(p.damage || 0) },
     stale: Date.now() - p.updatedAt > STALE_MS,
   }));
@@ -119,16 +120,24 @@ function safeProfile(request) {
 
 const LOADOUT_MS = 30000;
 const WEAPON_IDS = new Set([1, 2, 3, 4, 5, 6]);
+const PRIMARY_WEAPON_IDS = new Set([1, 2, 3, 5]);
+const SECONDARY_WEAPON_IDS = new Set([4, 6]);
+const UTILITY_IDS = new Set(["frag", "flash", "smoke"]);
 const DEFAULT_LOADOUT = [2, 4];
 
+function cleanUtility(raw) {
+  return UTILITY_IDS.has(raw) ? raw : "frag";
+}
+
 function cleanLoadout(raw) {
-  const out = [];
+  let primary = null, secondary = null;
   for (const id of Array.isArray(raw) ? raw : []) {
     const n = Number(id);
-    if (WEAPON_IDS.has(n) && !out.includes(n)) out.push(n);
-    if (out.length === 2) break;
+    if (!WEAPON_IDS.has(n)) continue;
+    if (PRIMARY_WEAPON_IDS.has(n) && primary === null) primary = n;
+    else if (SECONDARY_WEAPON_IDS.has(n) && secondary === null) secondary = n;
   }
-  return out;
+  return [primary, secondary].filter((id) => id !== null);
 }
 
 function beginLoadout(lobby) {
@@ -143,7 +152,7 @@ function beginLoadout(lobby) {
   lobby.ready.clear();
   lobby.loadoutReady.clear();
   lobby.mapSeed = randomInt(1, 0x7fffffff);
-  for (const p of lobby.players.values()) p.loadout = [];
+  for (const p of lobby.players.values()) { p.loadout = []; p.utility = cleanUtility(p.utility); }
   lobby.loadoutEndsAt = Date.now() + LOADOUT_MS;
   lobby.loadoutTimer = setTimeout(() => endLoadout(lobby), LOADOUT_MS + 250);
   sendLobby(lobby);
@@ -154,9 +163,7 @@ function endLoadout(lobby) {
   clearTimeout(lobby.loadoutTimer);
   lobby.loadoutTimer = null;
   for (const p of lobby.players.values()) {
-    const l = cleanLoadout(p.loadout);
-    for (const d of DEFAULT_LOADOUT) if (l.length < 2 && !l.includes(d)) l.push(d);
-    p.loadout = l;
+    p.loadout = cleanLoadout([...(p.loadout || []), ...DEFAULT_LOADOUT]);
   }
   lobby.loadoutReady.clear();
   startRound(lobby);
@@ -214,6 +221,8 @@ function startRound(lobby) {
   for (const player of lobby.players.values()) {
     player.hp = lobby.config.health;
     player.alive = true;
+    player.utilityAmmo = 1;
+    player.utilityCooldownUntil = 0;
     player.position = null;   // the client places itself on a valid spawn and reports it
     player.aim = null;
     player.updatedAt = Date.now();
@@ -333,6 +342,10 @@ async function addToLobby(socket, code, profile) {
     position: null,
     aim: null,
     team: null,
+    utility: "frag",
+    utilityAmmo: 0,
+    utilityCooldownUntil: 0,
+    lastUtilityAt: 0,
     hp: 100,
     alive: true,
     kills: 0,
@@ -516,6 +529,7 @@ io.on("connection", (socket) => {
     const player = lobby?.players.get(socket.id);
     if (!lobby || !player || lobby.phase !== "loadout") return;
     player.loadout = cleanLoadout(data.weapons);
+    player.utility = cleanUtility(data.utility);
     if (data.ready && player.loadout.length === 2) lobby.loadoutReady.add(socket.id);
     else lobby.loadoutReady.delete(socket.id);
     sendLobby(lobby);
@@ -572,6 +586,31 @@ io.on("connection", (socket) => {
     io.to(lobby.code).emit("players:snapshot", publicPlayers(lobby));
   });
 
+  socket.on("match:utility", (data = {}) => {
+    const lobby = getLobby(socket);
+    const player = lobby?.players.get(socket.id);
+    if (!lobby || lobby.phase !== "playing" || !player?.alive) return;
+    const type = data.type;
+    const position = data.position;
+    const velocity = data.velocity;
+    const fuseByType = { frag: 1.9, flash: 0.9, smoke: 1.0 };
+    if (!UTILITY_IDS.has(type) || type !== player.utility || player.utilityAmmo <= 0) return;
+    if (!position || !velocity) return;
+    const pos = [position.x, position.y, position.z];
+    const vel = [velocity.x, velocity.y, velocity.z];
+    if (![...pos, ...vel].every(Number.isFinite) || pos.some((n) => Math.abs(n) > MAX_POSITION)) return;
+    if (Math.hypot(...vel) > 80 || Date.now() < player.utilityCooldownUntil || Date.now() - player.lastUtilityAt < 300) return;
+    player.utilityAmmo -= 1;
+    player.lastUtilityAt = Date.now();
+    player.utilityCooldownUntil = Date.now() + (type === "frag" ? 15000 : 12000);
+    socket.to(lobby.code).emit("match:utility", {
+      playerId: socket.id, type,
+      position: { x: position.x, y: position.y, z: position.z },
+      velocity: { x: velocity.x, y: velocity.y, z: velocity.z },
+      fuse: fuseByType[type], serverTime: Date.now(),
+    });
+  });
+
   socket.on("match:hit", ({ targetId, damage } = {}) => {
     const lobby = getLobby(socket);
     const shooter = lobby?.players.get(socket.id);
@@ -601,6 +640,22 @@ io.on("connection", (socket) => {
     if (!target.alive) {
       const remaining = [...lobby.players.values()].filter((p) => p.team === target.team && p.alive);
       if (!remaining.length) finishRoundAfterFall(lobby, shooter.team);
+    }
+  });
+
+  socket.on("match:self-hit", ({ damage } = {}) => {
+    const lobby = getLobby(socket);
+    const player = lobby?.players.get(socket.id);
+    const value = Number(damage);
+    if (!lobby || lobby.phase !== "playing" || !player?.alive || !Number.isFinite(value) || value <= 0) return;
+    player.hp = Math.max(0, player.hp - Math.min(120, value));
+    player.alive = player.hp > 0;
+    if (!player.alive) player.deaths += 1;
+    sendLobby(lobby);
+    if (!player.alive) {
+      io.to(lobby.code).emit("match:kill", { killer: null, killerTeam: null, victim: player.profile.username, victimTeam: player.team, fell: true, counts: teamCounts(lobby) });
+      const mates = [...lobby.players.values()].filter((q) => q.team === player.team && q.alive);
+      if (!mates.length) finishRoundAfterFall(lobby, player.team === "red" ? "blue" : "red");
     }
   });
 
