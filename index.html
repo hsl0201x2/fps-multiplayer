@@ -733,6 +733,12 @@ let hudEl, weaponTextEl, overlayEl, damageFlashEl, hitMarkerEl;
 // Scope
 
 const SCOPE_FOV = 15;
+function scopeViewFov() {
+  const baseTan = Math.tan(settings.fov * Math.PI / 360);
+  const nominalTan = Math.tan(SCOPE_FOV * Math.PI / 360);
+  const zoomRatio = baseTan / nominalTan;
+  return 2 * Math.atan(0.4885 / zoomRatio) * 180 / Math.PI;
+}
 const DEFAULT_FOV = 82;
 let scopeCanvas, scopeCtx;
 
@@ -966,14 +972,16 @@ function prettyKey(code) {
 const SAVE_KEY = "tacticalFps.settings.v1";
 function saveSettings() {
   try {
+    const savedSelection = window.__fpsVersusActive && window.__fpsSoloMenuSettings ? window.__fpsSoloMenuSettings : settings;
+    const savedHotbarState = window.__fpsVersusActive && window.__fpsSoloHotbar ? window.__fpsSoloHotbar : hotbar;
     localStorage.setItem(SAVE_KEY, JSON.stringify({
       sens: settings.sens, adsSens: settings.adsSens, fov: settings.fov,
-      map: settings.map, mode: settings.mode, sandbox: settings.sandbox, mission: settings.mission, difficulty: settings.difficulty, viewBob: settings.viewBob, blood: settings.blood,
+      map: savedSelection.map, mode: savedSelection.mode, sandbox: savedSelection.sandbox, mission: settings.mission, difficulty: settings.difficulty, viewBob: settings.viewBob, blood: settings.blood,
       viewBobIntensity: settings.viewBobIntensity, gunBobIntensity: settings.gunBobIntensity,
       screenBobIntensity: settings.screenBobIntensity, fpsLimit: settings.fpsLimit,
       renderScale: settings.renderScale, antialias: settings.antialias, shadows: settings.shadows,
       scopePreviewSize: settings.scopePreviewSize, sideUtility: settings.sideUtility,
-      time: settings.time, crosshair: settings.crosshair, zoomVer: 4, gunSway: settings.gunSway, zoomIron: settings.zoomIron, zoomDot: settings.zoomDot, adsSensGun: settings.adsSensGun, adsSpeed: settings.adsSpeed, sights: settings.sights, binds, hotbar
+      time: settings.time, crosshair: settings.crosshair, zoomVer: 4, gunSway: settings.gunSway, zoomIron: settings.zoomIron, zoomDot: settings.zoomDot, adsSensGun: settings.adsSensGun, adsSpeed: settings.adsSpeed, sights: settings.sights, binds, hotbar: savedHotbarState
     }));
   } catch (e) {}
 }
@@ -1646,7 +1654,7 @@ function updateScopeTransition(dt) {
 
   // Magnify only after the rifle reaches the optic, then blend the FOV with the scope screen.
   const from = Math.tan(settings.fov * Math.PI / 360);
-  let to = Math.tan(SCOPE_FOV * Math.PI / 360), zb = scopeViewBlend;
+  let to = Math.tan(scopeViewFov() * Math.PI / 360), zb = scopeViewBlend;
   zb = scopeBlend;   // the whole view zooms with the aim, including the area outside the scope lens
   if (curWeaponNum !== 1) to = from / (sightChoice(curWeaponNum) === "dot" ? settings.zoomDot : settings.zoomIron);   // iron sights zoom a little, red dots more
   camera.fov = 2 * Math.atan(from + (to - from) * zb) * 180 / Math.PI;
@@ -4528,7 +4536,7 @@ function renderScopePreview() {
   scopePreviewCamera.quaternion.copy(camera.quaternion);
   scopePreviewCamera.near = camera.near;
   scopePreviewCamera.far = camera.far;
-  { const zA = Math.tan(settings.fov * Math.PI / 360) / Math.tan(SCOPE_FOV * Math.PI / 360); scopePreviewCamera.fov = 2 * Math.atan(0.4885 / zA) * 180 / Math.PI; }   // same magnification as the rest of the screen
+  scopePreviewCamera.fov = scopeViewFov();   // same magnification as the rest of the screen
   scopePreviewCamera.aspect = 1;
   scopePreviewCamera.updateProjectionMatrix();
 
@@ -10023,9 +10031,11 @@ function startEnemyDeath(enemy, fromPos) {
   if (settings.blood && ud.rig) makeBloodPool(enemy);
   dyingEnemies.push(enemy);
 }
-function updateDyingEnemies(dt) {
+function updateDyingEnemies(dt, onlyEnemy = null) {
   for (let i = dyingEnemies.length - 1; i >= 0; i--) {
-    const e = dyingEnemies[i], ud = e.userData; ud.deadT += dt;
+    const e = dyingEnemies[i];
+    if (onlyEnemy && e !== onlyEnemy) continue;
+    const ud = e.userData; ud.deadT += dt;
     if (ud.pool) {
       if (ud.deadT < 1.1 && ud.rig) { const c = ud.rig.upper.localToWorld(_bV1.set(0, 1.0, 0)); ud.pool.position.x = c.x; ud.pool.position.z = c.z; }   // sits under the torso while the body is still falling
       const kk = clamp((ud.deadT - 0.4) / 7, 0, 1), ee = 1 - (1 - kk) * (1 - kk);
@@ -10115,7 +10125,7 @@ function updateDyingEnemies(dt) {
         if (mn < gy) r.model.position.y += (gy - mn) * (1 - e1);
       }
     }
-    if (ud.deadT > CORPSE_LIFETIME) { removeBloodPool(ud); if (ud.dropGun) scene.remove(ud.dropGun); e.traverse(o => { if (o.material && o.material.transparent === false) { /* shared materials: just hide */ } }); scene.remove(e); dyingEnemies.splice(i, 1); }
+    if (!ud.keepCorpse && ud.deadT > CORPSE_LIFETIME) { removeBloodPool(ud); if (ud.dropGun) scene.remove(ud.dropGun); e.traverse(o => { if (o.material && o.material.transparent === false) { /* shared materials: just hide */ } }); scene.remove(e); dyingEnemies.splice(i, 1); }
   }
 }
 
@@ -11541,7 +11551,7 @@ function applyWeaponFeel(dt, isMoving, isSprinting) {
   const scopePose = (!grenadeEquipped && w.type !== "melee") ? gunAimBlend : 0;
   const scopeZ = (!grenadeEquipped && w.type !== "melee") ? scopeBlend : 0;   // size / zoom keep the original timing
   let ax = -0.14 * 1.4, ay = 0, az = 0.33;     // AWP: scope axis. Other guns: their chosen sight sits dead centre, ~30 cm from the eye
-  const zoomFin = curWeaponNum === 1 ? Math.tan(settings.fov * Math.PI / 360) / Math.tan(SCOPE_FOV * Math.PI / 360) : (sightChoice(curWeaponNum) === "dot" ? settings.zoomDot : settings.zoomIron);
+  const zoomFin = curWeaponNum === 1 ? Math.tan(settings.fov * Math.PI / 360) / Math.tan(scopeViewFov() * Math.PI / 360) : (sightChoice(curWeaponNum) === "dot" ? settings.zoomDot : settings.zoomIron);
   const kAds = curWeaponNum === 1 ? 1.75 / zoomFin : (weapons[curWeaponNum].type === "pistol" ? 1.5 : ADS_SCALE) / zoomFin;   // the zoom magnifies the gun too, so shrink it back: it always looks ADS_SCALE big
   if (curWeaponNum === 1) { ax = -0.14 * 1.15 * kAds; az = -0.14 + kAds * 0.336 * 1.15; }   // the zoom magnifies the rifle too, so it is shrunk back; the eyepiece stays the same distance from the eye
   if (curWeaponNum !== 1) { const d = adsFor(curWeaponNum); ax = -d[0] * kAds; ay = -d[1] * kAds - ADS_DROP; az = -(weapons[curWeaponNum].type === "pistol" ? 1.12 : 0.80) - d[2] * kAds; }
@@ -11669,7 +11679,7 @@ function addEventListeners() {
     const zb = scopeBlend;
     if (zb > 0) {
       const halfRad = Math.PI / 360, f0 = Math.tan(settings.fov * halfRad);
-      if (curWeaponNum === 1) sens *= (f0 + (Math.tan(SCOPE_FOV * halfRad) - f0) * zb) / f0 * (1 + (settings.adsSens - 1) * zb);   // the lens shows a magnified view, so turn slower
+      if (curWeaponNum === 1) sens *= (f0 + (Math.tan(scopeViewFov() * halfRad) - f0) * zb) / f0 * (1 + (settings.adsSens - 1) * zb);   // the lens shows a magnified view, so turn slower
       else sens *= Math.tan(camera.fov * halfRad) / f0 * (1 + (settings.adsSensGun - 1) * zb);
     }
     yaw   -= e.movementX * sens;
@@ -12329,6 +12339,7 @@ initDeathScreen();
       }
       group.userData.isEnemy = true;
       group.userData.remotePlayerId = player.id || "";
+      group.userData.alive = true;
       group.userData.hp = 100;
       group.userData.vel.set(0, 0, 0);
       group.userData.state = "engage";
@@ -12358,6 +12369,10 @@ initDeathScreen();
     }
 
     function removeRemoteAvatar(playerId, avatar) {
+      const corpseIndex = dyingEnemies.indexOf(avatar.group);
+      if (corpseIndex >= 0) dyingEnemies.splice(corpseIndex, 1);
+      removeBloodPool(avatar.group.userData);
+      if (avatar.group.userData.dropGun) scene.remove(avatar.group.userData.dropGun);
       if (avatar.group.parent) avatar.group.parent.remove(avatar.group);
       const label = avatar.group.userData.nameLabel;
       if (label) { label.material.map?.dispose(); label.material.dispose(); }
@@ -12447,6 +12462,8 @@ initDeathScreen();
       lobbyPlayerSnapshots = [];
       window.__fpsVersusActive = false;
       window.__fpsLocalTeam = null;
+      window.__fpsSoloMenuSettings = null;
+      window.__fpsSoloHotbar = null;
       PLAYER_MAX_HP = 100;
       clearRemoteAvatars();
       updateLobbyInterface();
@@ -12500,6 +12517,7 @@ initDeathScreen();
         avatar.targetYaw = playerYaw;
         avatar.group.userData.remotePitch = playerPitch;
         avatar.group.userData.remotePlayerId = playerId;
+        const wasAlive = avatar.group.userData.alive !== false;
         avatar.group.userData.hp = Number.isFinite(player.hp) ? player.hp : 100;
         avatar.group.userData.team = player.team || null;
         avatar.group.userData.alive = player.alive !== false;
@@ -12507,7 +12525,11 @@ initDeathScreen();
           const key = (player.profile.username || "Player") + "|" + (player.team || "");
           if (avatar.tagText !== key) { avatar.tagText = key; drawNameTag(avatar, player.profile.username || "Player", player.team || null); }
         }
-        avatar.group.visible = avatar.group.userData.alive;
+        avatar.group.visible = true;
+        if (!avatar.group.userData.alive && wasAlive) {
+          avatar.group.userData.keepCorpse = true;
+          startEnemyDeath(avatar.group, camera.position);
+        }
         // enemy names are hidden behind walls; teammates stay visible
         if (avatar.label) avatar.label.material.depthTest = !(player.team && player.team === window.__fpsLocalTeam);   // teammates show through walls, enemies don't
       }
@@ -12525,6 +12547,10 @@ initDeathScreen();
         for (const avatar of remoteAvatarById.values()) {
           const g = avatar.group;
           if (!avatar.target || !g.visible) continue;
+          if (g.userData.dying) {
+            if (!locked || !roundActive) updateDyingEnemies(dt, g);
+            continue;
+          }
           const k = 1 - Math.exp(-dt * 16);
           const px = g.position.x, pz = g.position.z;
           g.position.x += (avatar.target.x - g.position.x) * k;
@@ -12536,7 +12562,7 @@ initDeathScreen();
           const vk = 1 - Math.exp(-dt * 10);
           g.userData.vel.x += ((g.position.x - px) / dt - g.userData.vel.x) * vk;
           g.userData.vel.z += ((g.position.z - pz) / dt - g.userData.vel.z) * vk;
-          try { animateEnemy(g, dt); } catch (e) {}
+          if (!g.userData.dying) { try { animateEnemy(g, dt); } catch (e) {} }
         }
         requestAnimationFrame(frame);
       }
@@ -12957,20 +12983,21 @@ initDeathScreen();
   window.startRun=function(){_baseStartRun.apply(this,arguments);try{if(!window.__fpsVersusActive)coopGather();}catch(e){console.warn(e);}};
 
   // ---------- state ----------
-  let savedHotbar=null,savedSolo=null,countdownTimer=null,stageTimer=null,matchStage=0,mpPaused=false,fellSent=false,mpDraft=null;
+  let savedHotbar=null,savedSolo=null,countdownTimer=null,stageTimer=null,matchStage=0,mpPaused=false,mpSettingsOpen=false,fellSent=false,mpDraft=null;
   const TEAM_NAME={red:"Red team",blue:"Blue team"},TEAM_HEX={red:"#ff5a5a",blue:"#4db8ff"};
   const SKIN_LABEL={rifler:"Rifler",shotgun:"Shotgunner",sniper:"Sniper",heavy:"Heavy"};
   const cntEl=$("mpCount"),hudEl=$("mpHud"),feedEl=$("mpFeed"),banEl=$("mpBanner");
   function show(html,cls){content.innerHTML=html;modal.className=cls||"";modal.hidden=false;}
   function hideBanner(){banEl.hidden=true;banEl.innerHTML="";}
   function leaveToMenu(){
+    dismissPauseSettings();
     clearInterval(countdownTimer);clearTimeout(stageTimer);mpPaused=false;matchStage=0;
     window.__fpsVersusActive=false;window.__fpsLocalTeam=null;PLAYER_MAX_HP=100;
     roundActive=false;document.exitPointerLock?.();
     window.__fpsHoldOverlay=false;
-    if(savedHotbar){hotbar=savedHotbar;savedHotbar=null;updateHotbarHud();}
+    if(savedHotbar){hotbar=savedHotbar;savedHotbar=null;updateHotbarHud();}window.__fpsSoloHotbar=null;
     ldBuilt=false;clearInterval(ldTick);cntEl.classList.remove("show");
-    if(savedSolo){settings.map=savedSolo.map;settings.mode=savedSolo.mode;settings.sandbox=savedSolo.sandbox;savedSolo=null;}
+    if(savedSolo){settings.map=savedSolo.map;settings.mode=savedSolo.mode;settings.sandbox=savedSolo.sandbox;savedSolo=null;}window.__fpsSoloMenuSettings=null;
     mpState=null;mpResult=null;mpDraft=null;
     hide();hideBanner();hudEl.hidden=true;feedEl.innerHTML="";
     const r=$("lobbyRoster");if(r)r.innerHTML="";
@@ -13226,6 +13253,35 @@ initDeathScreen();
     banEl.innerHTML=`<b>Eliminated</b><span>Waiting for the round to end</span><button class="mpBtn danger" id="mpBanLeave" style="padding:6px 14px;font-size:12px">Leave</button>`;
     banEl.hidden=false;wireLeave("mpBanLeave");
   }
+  function dismissPauseSettings(){
+    if(!mpSettingsOpen)return;
+    mpSettingsOpen=false;
+    overlayEl.style.display="none";
+    $("mapTabBtn").hidden=false;$("menuTabs").querySelector('[data-tab="hotbar"]').hidden=false;
+    $("startBtn").onclick=startOrResume;
+  }
+  function closePauseSettings(){
+    dismissPauseSettings();
+    showPause();
+  }
+  function openPauseSettings(){
+    mpSettingsOpen=true;
+    modal.hidden=true;
+    $("mapTabBtn").hidden=true;$("menuTabs").querySelector('[data-tab="hotbar"]').hidden=true;
+    showMenu("pause");
+    $("restartBtn").style.display="none";
+    $("startBtn").textContent="Back to pause";
+    $("startBtn").onclick=closePauseSettings;
+    $("menuHint").textContent="Settings apply immediately. The match continues for everyone else.";
+    $("menuTabs").querySelector('[data-tab="controls"]').click();
+  }
+  function startLocalVersusDeathFall(){
+    if(dying)return;
+    if(scoped)setScoped(false);
+    dying=true;deathT=0;deathRollDir=Math.random()<0.5?-1:1;
+    if(weaponGroup)weaponGroup.visible=false;
+    document.body.classList.add("dead");
+  }
   function showPause(){
     mpPaused=true;
     const st=mpState,cfg=st?.config||{},mi=MAP_INFO[cfg.map]||{},ps=st?.players||[];
@@ -13235,9 +13291,10 @@ initDeathScreen();
       `<button class="mTile v" id="mpResume">${'<svg viewBox="0 0 100 100" fill="currentColor"><path d="M30 16l54 34-54 34z"/></svg>'}<b>Resume</b><p>Jump back into the match.</p><div class="chips"><span>Click to continue</span></div></button>
        <div class="card"><h3>Match</h3><div class="pRow"><span>Map</span><b>${esc(mi.name||"—")}</b></div><div class="pRow"><span>Round</span><b>${st?.round||1} / ${cfg.rounds||1}</b></div><div class="pRow"><span>Score</span><b><i style="font-style:normal" class="f">${wins[my]}</i> — <i style="font-style:normal;color:var(--red)">${wins[ot]}</i></b></div><div class="pRow"><span>Your team alive</span><b class="f">${al(my)}</b></div><div class="pRow"><span>Enemy alive</span><b class="e">${al(ot)}</b></div></div>
        <div class="card"><h3>You</h3><div class="big3"><div><b>${me?.stats?.kills||0}</b><span>Kills</span></div><div><b>${me?.stats?.deaths||0}</b><span>Deaths</span></div></div><div class="pRow"><span>Damage</span><b>${me?.stats?.damage||0}</b></div><div class="pRow"><span>Team</span><b class="${my==="red"?"e":"f"}">${TEAM_NAME[my]}</b></div></div>`,
-      ""),"screen pause");
+      `<button class="mpBtn" id="mpOpenSettings">Controls &amp; settings</button>`),"screen pause");
     wireLeave();
     $("mpResume").addEventListener("click",()=>{mpPaused=false;hide();requestLock();});
+    $("mpOpenSettings").addEventListener("click",openPauseSettings);
   }
 
   window.addEventListener("fps-versus-pause",()=>{if(window.__fpsVersusActive&&roundActive)showPause();});
@@ -13268,10 +13325,15 @@ initDeathScreen();
     const cfg=state?.config;if(!cfg)return;
     mpState=state;mpResult=null;mpPaused=false;fellSent=false;matchStage=0;lastCounts=null;
     clearInterval(countdownTimer);clearTimeout(stageTimer);hideBanner();
+    dismissPauseSettings();
+    dying=false;deathT=0;document.body.classList.remove("dead");
+    if(weaponGroup)weaponGroup.visible=true;
+    clearRemoteAvatars();
     window.__fpsVersusActive=state.mode==="versus";
     const self=state.players?.find(p=>p.id===multiplayerSocket.id);window.__fpsLocalTeam=self?.team||null;
     if(!window.__fpsVersusActive){hide();return;}
     if(!savedSolo)savedSolo={map:settings.map,mode:settings.mode,sandbox:settings.sandbox};
+    window.__fpsSoloMenuSettings=savedSolo;
     settings.mode="survival";settings.sandbox=false;settings.map=cfg.map;missionRun=null;PLAYER_MAX_HP=cfg.health;
     if(scoped)setScoped(false);
     clearEnemies();clearTracers();
@@ -13279,7 +13341,7 @@ initDeathScreen();
     runMap=cfg.map;runKey=selectionKey();
     window.__fpsHoldOverlay=false;
     const myLo=(self?.loadout||[]).filter(id=>weapons[id]);
-    if(myLo.length){if(!savedHotbar)savedHotbar=hotbar.slice();hotbar=[myLo[0],myLo[1]??null,null];}
+    if(myLo.length){if(!savedHotbar)savedHotbar=hotbar.slice();window.__fpsSoloHotbar=savedHotbar;hotbar=[myLo[0],myLo[1]??null,null];}
     updateHotbarHud();
     setWeaponInstant(hotbar.find(id=>id!==null)??1);
     startRun();clearEnemies();spawnRemaining=0;waveBotsRemaining=0;nextWaveIn=-1;
@@ -13303,7 +13365,7 @@ initDeathScreen();
   },200);
 
   window.addEventListener("fps-match-start",e=>startRound(e.detail));
-  document.addEventListener("click",e=>{if(!modal.hidden||e.target.closest?.("#mpModal,#mpBanner"))return;if(window.__fpsVersusActive&&roundActive&&document.pointerLockElement!==renderer.domElement)requestLock();});
+  document.addEventListener("click",e=>{if(mpPaused||mpSettingsOpen||!modal.hidden||e.target.closest?.("#mpModal,#mpBanner"))return;if(window.__fpsVersusActive&&roundActive&&document.pointerLockElement!==renderer.domElement)requestLock();});
   document.getElementById("createLobbyBtn")?.addEventListener("click",()=>multiplayerSocket.emit("lobby:profile",profile()));
   document.getElementById("joinLobbyBtn")?.addEventListener("click",()=>multiplayerSocket.emit("lobby:profile",profile()));
   document.getElementById("continueLobbyBtn")?.addEventListener("click",async()=>{if(!host()){return;}const r=await request("lobby:continue");if(!r.ok)alert(r.error);});
@@ -13317,7 +13379,12 @@ initDeathScreen();
         window.__fpsLocalTeam=self.team||window.__fpsLocalTeam;
         playerHP=self.hp;updatePlayerHealthBar();
         if(lostHp>0){flashHealthBar();showBloodEdges(lostHp);}
-        if(self.alive===false&&roundActive){roundActive=false;document.exitPointerLock?.();}
+        if(self.alive===false&&roundActive){
+          startLocalVersusDeathFall();
+          dismissPauseSettings();
+          if(mpPaused){mpPaused=false;hide();}
+          roundActive=false;document.exitPointerLock?.();
+        }
       }
     }
     showLobbyPhase();
@@ -13328,6 +13395,7 @@ initDeathScreen();
   multiplayerSocket.on("match:kill",addKill);
   multiplayerSocket.on("match:result",data=>{
     mpResult=data;mpState=data.state;roundActive=false;window.__fpsVersusActive=false;mpPaused=false;matchStage=0;
+    dismissPauseSettings();
     window.__fpsHoldOverlay=true;overlayEl.style.display="none";   // keep the live game view (your own camera) behind the result screens
     document.exitPointerLock?.();
     cntEl.classList.remove("show");
