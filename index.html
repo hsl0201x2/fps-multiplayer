@@ -6875,11 +6875,96 @@ function mapBuilding(x0, x1, z0, z1, H, kind, ops, roof) {
   wallRun("z", z0, z1, x0, 0, H, 0.3, kind, ops.w); wallRun("z", z0, z1, x1, 0, H, 0.3, kind, ops.e);
   if (roof) addBox((x0 + x1) / 2, H, (z0 + z1) / 2, x1 - x0 + 0.5, 0.3, z1 - z0 + 0.5, 0, typeof roof === "string" ? roof : "concrete");
   kVis(x1 - x0 + 0.3, 0.12, 0.34, (x0 + x1) / 2, 0.06, z1, 0x6c6a64, 0.1, 0.9); kVis(x1 - x0 + 0.3, 0.12, 0.34, (x0 + x1) / 2, 0.06, z0, 0x6c6a64, 0.1, 0.9);   // foundation course
+  // Restrained corner pilasters and a continuous cornice give the flat wall shells
+  // readable scale without adding new collision volumes or covering openings.
+  for (const x of [x0 + 0.12, x1 - 0.12]) {
+    kVis(0.12, Math.max(0.4, H - 0.22), 0.10, x, H / 2, z0 - 0.17, 0xb7a88d, 0.05, 0.82);
+    kVis(0.12, Math.max(0.4, H - 0.22), 0.10, x, H / 2, z1 + 0.17, 0xb7a88d, 0.05, 0.82);
+  }
+  kVis(x1 - x0 + 0.42, 0.14, 0.22, (x0 + x1) / 2, H - 0.08, z0 - 0.16, 0xc4b79e, 0.05, 0.82);
+  kVis(x1 - x0 + 0.42, 0.14, 0.22, (x0 + x1) / 2, H - 0.08, z1 + 0.16, 0xc4b79e, 0.05, 0.82);
+}
+function mapWindow(axis, center, fixed, width = 1.8, bottom = 1, height = 1.2, face = 1, trim = 0xd8c8a8) {
+  // Flush glazing and a thin four-sided frame; all pieces are visual-only.
+  const off = face * 0.19, frameOff = face * 0.24, frame = 0.08, pane = 0x304d59;
+  if (axis === "x") {
+    kVis(width - 0.16, height - 0.14, 0.045, center, bottom + height / 2, fixed + off, pane, 0.45, 0.28);
+    kVis(width + 0.08, frame, 0.08, center, bottom - frame / 2, fixed + frameOff, trim, 0.05, 0.78);
+    kVis(width + 0.08, frame, 0.08, center, bottom + height + frame / 2, fixed + frameOff, trim, 0.05, 0.78);
+    for (const side of [-1, 1]) kVis(frame, height, 0.08, center + side * (width / 2), bottom + height / 2, fixed + frameOff, trim, 0.05, 0.78);
+    kVis(0.045, height - 0.12, 0.05, center, bottom + height / 2, fixed + face * 0.27, trim, 0.05, 0.78);
+  } else {
+    kVis(0.045, height - 0.14, width - 0.16, fixed + off, bottom + height / 2, center, pane, 0.45, 0.28);
+    kVis(0.08, frame, width + 0.08, fixed + frameOff, bottom - frame / 2, center, trim, 0.05, 0.78);
+    kVis(0.08, frame, width + 0.08, fixed + frameOff, bottom + height + frame / 2, center, trim, 0.05, 0.78);
+    for (const side of [-1, 1]) kVis(0.08, height, frame, fixed + frameOff, bottom + height / 2, center + side * (width / 2), trim, 0.05, 0.78);
+    kVis(0.05, height - 0.12, 0.045, fixed + face * 0.27, bottom + height / 2, center, trim, 0.05, 0.78);
+  }
+}
+function mapGableRoof(cx, cz, width, depth, eaveY, rise, color = 0x3b4149) {
+  const z0 = cz - depth / 2, z1 = cz + depth / 2, ridgeY = eaveY + rise, ridgeX = cx;
+  const addPlane = (verts) => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+    g.setIndex([0, 1, 2, 0, 2, 3]); g.computeVertexNormals();
+    const roofMat = propMat(color, 0.28, 0.78).clone(); roofMat.side = THREE.DoubleSide;
+    const m = new THREE.Mesh(g, roofMat);
+    addVisual(m);
+  };
+  addPlane([cx - width / 2, eaveY, z0, ridgeX, ridgeY, z0, ridgeX, ridgeY, z1, cx - width / 2, eaveY, z1]);
+  addPlane([ridgeX, ridgeY, z0, cx + width / 2, eaveY, z0, cx + width / 2, eaveY, z1, ridgeX, ridgeY, z1]);
+  for (const x of [cx - width / 2, cx + width / 2]) kVis(0.12, 0.12, depth + 0.2, x, eaveY, cz, 0x252a30, 0.35, 0.62);
+  kVis(0.18, 0.18, depth + 0.22, cx, ridgeY, cz, 0x252a30, 0.4, 0.55);
+}
+function mapPorch(cx, wallZ, face, width = 2.4) {
+  const frontZ = wallZ + face * 0.7, postZ = wallZ + face * 0.45;
+  kVis(width, 0.16, 1.25, cx, 0.08, frontZ, 0x77553a, 0.05, 0.9);
+  kVis(width + 0.25, 0.14, 1.55, cx, 2.35, frontZ, 0x3a4148, 0.25, 0.72);
+  for (const dx of [-width * 0.42, width * 0.42]) kVis(0.12, 2.2, 0.12, cx + dx, 1.15, postZ, 0xede4d2, 0.02, 0.84);
+  kVis(width * 0.84, 0.1, 0.1, cx, 2.18, postZ, 0xede4d2, 0.02, 0.84);
+}
+const _terminalDisplayTextures = new Map();
+function terminalDisplayTexture(title = "DEPARTURES", aspect = 3) {
+  const key = `${title}:${aspect.toFixed(2)}`;
+  if (_terminalDisplayTextures.has(key)) return _terminalDisplayTextures.get(key);
+  const c = document.createElement("canvas"); c.width = 768; c.height = Math.max(144, Math.round(768 / clamp(aspect, 1.5, 6)));
+  const g = c.getContext("2d");
+  g.fillStyle = "#071521"; g.fillRect(0, 0, c.width, c.height);
+  const headerH = Math.round(c.height * 0.22), headerSize = Math.max(14, Math.round(c.height * 0.12));
+  const rowSize = Math.max(11, Math.round(c.height * 0.078));
+  g.fillStyle = "#17384a"; g.fillRect(0, 0, c.width, headerH);
+  g.fillStyle = "#eaf5f7"; g.font = `700 ${headerSize}px Arial`; g.fillText(title, 24, Math.round(headerH * 0.70));
+  g.fillStyle = "#78d8ed"; g.font = `700 ${Math.max(10, Math.round(c.height * 0.066))}px Arial`;
+  g.fillText("TIME     DESTINATION           GATE     STATUS", 24, headerH + Math.round(c.height * 0.12));
+  g.strokeStyle = "rgba(190,225,235,.18)"; g.lineWidth = 1;
+  const rows = [["08:40", "NORTH CITY", "A12", "ON TIME"], ["09:05", "COASTAL BAY", "B04", "BOARDING"], ["09:30", "MOUNTAIN VIEW", "C07", "ON TIME"]];
+  rows.forEach((row, i) => {
+    const y = headerH + Math.round(c.height * (0.30 + i * 0.20));
+    g.beginPath(); g.moveTo(20, y + 10); g.lineTo(748, y + 10); g.stroke();
+    g.fillStyle = "#e9f0f4"; g.font = `600 ${rowSize}px Arial`;
+    g.fillText(row[0], 24, y); g.fillText(row[1], 150, y); g.fillText(row[2], 478, y);
+    g.fillStyle = row[3] === "BOARDING" ? "#f2bf57" : "#7fe0a5"; g.fillText(row[3], 574, y);
+  });
+  const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true; _terminalDisplayTextures.set(key, tex); return tex;
+}
+function mapTerminalDisplay(w, h, x, y, z, rotationY = 0, title = "DEPARTURES") {
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, h),
+    new THREE.MeshBasicMaterial({ map: terminalDisplayTexture(title, w / h), side: THREE.DoubleSide }),
+  );
+  mesh.position.set(x, y, z); mesh.rotation.y = rotationY; mesh.castShadow = false;
+  return addVisual(mesh);
 }
 function mapTree(x, z, s = 1) {
-  addPaintedBox(x, 0, z, 0.5 * s, 3.2 * s, 0.5 * s, 0x5a4026, 0, 0.95);
-  for (const [dx, dy, dz, r, c] of [[0, 4.0, 0, 1.9, 0x2f6b34], [0.9, 3.4, 0.4, 1.4, 0x3a7a3c], [-0.8, 3.6, -0.5, 1.5, 0x2a5f30]]) {
-    const m = new THREE.Mesh(new THREE.SphereGeometry(r * s, 12, 9), propMat(c, 0, 0.95)); m.position.set(x + dx * s, dy * s, z + dz * s); addVisual(m);
+  kCyl(0.22 * s, 0.34 * s, 3.1 * s, x, 1.55 * s, z, 0x59412b, 0.02, 0.94, 9);
+  for (const [dx, dy, dz, r, c] of [
+    [0, 4.0, 0, 1.65, 0x386c3d], [0.92, 3.65, 0.42, 1.2, 0x467c45],
+    [-0.8, 3.55, -0.48, 1.28, 0x2e6036], [0.15, 4.65, -0.72, 1.1, 0x4a8047],
+    [-0.25, 3.35, 0.82, 1.05, 0x3a7040],
+  ]) {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(r * s, 16, 12), propMat(c, 0, 0.96));
+    m.position.set(x + dx * s, dy * s, z + dz * s); addVisual(m);
   }
 }
 function mapStall(x, z, color, axis = "x") {   // market stall: counter, posts, striped awning, produce
@@ -6902,6 +6987,11 @@ function buildSuburbMap() {   // Maple Court: small, fast, two houses across a c
   kVis(5, 0.04, 10, -16, 0.03, -17, 0x77746e, 0.05, 0.95); kVis(5, 0.04, 10, 17, 0.03, -17, 0x77746e, 0.05, 0.95);   // driveways
   // House A (south-west, faces the street): living room, kitchen, two bedrooms, attached garage
   mapBuilding(-27, -8, -34, -18, 3.2, "plaster", { s: [vDoor(-19, -17.4), vWin(-25.5, -23.5), vWin(-14, -11)], n: [vDoor(-18, -16.4), vWin(-25, -23), vWin(-12, -9.5)], w: [vWin(-30, -27.8), vWin(-24, -21.8)], e: [vDoor(-27, -25.4), vWin(-22, -20)] }, true);
+  mapGableRoof(-17.5, -26, 20.1, 17.2, 3.54, 1.55, 0x42464c);
+  mapWindow("x", -24.5, -18, 2.0, 1.0, 1.6, 1); mapWindow("x", -12.5, -18, 2.8, 1.0, 1.6, 1);
+  mapWindow("x", -24.0, -34, 2.0, 1.0, 1.6, -1); mapWindow("x", -10.75, -34, 2.7, 1.0, 1.6, -1);
+  mapWindow("z", -28.9, -27, 2.2, 1.0, 1.6, -1); mapWindow("z", -22.9, -27, 2.2, 1.0, 1.6, -1);
+  mapWindow("z", -21, -8, 2.0, 1.0, 1.6, 1); mapPorch(-18.2, -18, 1);
   wallRun("z", -34, -18, -17, 0, 3.1, 0.2, "plaster", [vDoor(-31, -29.4), vDoor(-23, -21.4)]); wallRun("x", -27, -17, -26, 0, 3.1, 0.2, "plaster", [vDoor(-24, -22.4)]);
   mapSofa(-12.5, -30.5, "x"); addPaintedBox(-12.5, 0, -28.2, 1.6, 0.45, 0.8, 0x6b5030, 0, 0.8); kVis(2.0, 0.9, 0.1, -12.5, 1.1, -33.8, 0x10161c, 0.4, 0.2); addPaintedBox(-11, 0, -33.4, 5, 0.95, 0.9, 0xd9d6cf, 0.1, 0.5);
   addPaintedBox(-23.5, 0, -31.5, 2.0, 0.6, 2.8, 0xa8b4c8, 0, 0.9); addPaintedBox(-26.3, 0, -27.8, 0.8, 2.0, 2.2, 0x6b5030, 0, 0.8); addPaintedBox(-22, 0, -20.5, 2.0, 0.6, 2.8, 0xb8a8a0, 0, 0.9);
@@ -6909,12 +6999,22 @@ function buildSuburbMap() {   // Maple Court: small, fast, two houses across a c
   parkedCar(-4, -24, "z", 0x6a1d1d); addPaintedBox(-1.2, 0, -28.5, 0.8, 1.0, 2.6, 0x4a5056, 0.4, 0.5);
   // House B (north-east, faces the pool yard)
   mapBuilding(6, 26, -62, -44, 3.2, "plaster", { s: [vDoor(14, 15.6), vWin(8, 10), vWin(19, 21.5), vWin(23, 24.8)], n: [vDoor(10, 11.6), vWin(16, 18), vWin(22, 24)], w: [vDoor(-52, -50.4), vWin(-58, -56)], e: [vWin(-58, -56), vWin(-50, -48)] }, true);
+  mapGableRoof(16, -53, 21.0, 19.0, 3.54, 1.6, 0x5b4b3e);
+  mapWindow("x", 9, -44, 2.0, 1.0, 1.6, 1); mapWindow("x", 20.25, -44, 2.5, 1.0, 1.6, 1); mapWindow("x", 23.9, -44, 1.8, 1.0, 1.6, 1);
+  mapWindow("x", 17, -62, 2.0, 1.0, 1.6, -1); mapWindow("x", 23, -62, 2.0, 1.0, 1.6, -1);
+  mapWindow("z", -57, 6, 2.0, 1.0, 1.6, -1); mapWindow("z", -57, 26, 2.0, 1.0, 1.6, 1);
+  mapWindow("z", -49, 26, 2.0, 1.0, 1.6, 1); mapPorch(14.8, -44, 1);
   wallRun("x", 6, 16, -53, 0, 3.1, 0.2, "plaster", [vDoor(10.5, 12)]); wallRun("z", -62, -44, 16, 0, 3.1, 0.2, "plaster", [vDoor(-58, -56.4), vDoor(-49, -47.4)]);
   addBox(15, 0, -43, 6, 0.5, 2.2, 0, "wood"); mapSofa(21, -58, "x", 0x7a4a3a); addPaintedBox(8.5, 0, -60, 2.0, 0.6, 2.8, 0xa8c4b8, 0, 0.9); addPaintedBox(24, 0, -52, 2.2, 0.95, 0.9, 0xd9d6cf, 0.1, 0.5); addPaintedBox(11, 0, -47, 1.6, 0.75, 0.9, 0x6b5030, 0, 0.8);
   // street: school bus, cars, barriers, lamps, hydrant, dumpster
-  addPaintedBox(-3, 0.45, -4, 11, 1.9, 2.5, 0xe0b020, 0.3, 0.5); kVis(10.8, 0.5, 2.54, -3, 1.55, -4, 0x1b2630, 0.5, 0.2); kVis(11.1, 0.12, 2.6, -3, 2.45, -4, 0xe8c030, 0.3, 0.5);
-  for (const bx of [-6.5, 0.5]) for (const bz of [-5.2, -2.8]) kCyl(0.45, 0.45, 0.3, bx, 0.45, bz, 0x0d0d0f, 0.1, 0.9, 12, "z");
-  parkedCar(10, -7.6, "x", 0x2f5a8a); parkedCar(22, -7.6, "x", 0x7a2f2f); parkedCar(-22, -7.6, "x", 0x5a5a5a); parkedCar(17, -15, "z", 0x3a5a3a);
+  addPaintedBox(-14, 0.45, -4, 11, 1.9, 2.5, 0xe0b020, 0.3, 0.5);
+  kVis(10.8, 0.5, 2.54, -14, 1.55, -4, 0x1b2630, 0.5, 0.2); kVis(11.1, 0.12, 2.6, -14, 2.45, -4, 0xe8c030, 0.3, 0.5);
+  for (const z of [-5.3, -2.7]) for (let i = 0; i < 5; i++) kVis(1.55, 0.42, 0.06, -18 + i * 2, 1.72, z, 0x345464, 0.52, 0.24);
+  kVis(0.12, 0.55, 1.55, -19.58, 1.1, -4, 0x24292d, 0.48, 0.52);
+  for (const z of [-4.8, -3.2]) kGlow(0.04, 0.22, 0.22, -19.66, 1.86, z, 0xffe3a2);
+  for (const z of [-4.8, -3.2]) kVis(0.12, 0.42, 0.2, -8.42, 1.35, z, 0x9e2c20, 0.12, 0.6);
+  for (const bx of [-17.5, -10.5]) for (const bz of [-5.2, -2.8]) kCyl(0.45, 0.45, 0.3, bx, 0.45, bz, 0x0d0d0f, 0.1, 0.9, 12, "z");
+  parkedCar(10, -7.6, "x", 0x2f5a8a); parkedCar(22, -7.6, "x", 0x7a2f2f); parkedCar(-23.5, -7.6, "x", 0x5a5a5a); parkedCar(17, -15, "z", 0x3a5a3a);
   kJersey(-26, -3, "z", 4); kJersey(26, -5, "z", 4); streetLamp(-20, -12.5); streetLamp(8, -12.5); streetLamp(22, -12.5); dumpster(27, -14, "z");
   kCyl(0.18, 0.2, 0.7, 4, 0.35, -12.2, 0xc0392b, 0.3, 0.6, 10);
   // front yards: hedges, picket fences, mailboxes, trees
@@ -6922,9 +7022,10 @@ function buildSuburbMap() {   // Maple Court: small, fast, two houses across a c
   for (const hx of [9, 13, 23]) addPaintedBox(hx, 0, -14.2, 3, 1.2, 0.9, 0x2f5a2f, 0, 0.95);
   kFence(-28, -13, -8, -13, 1.1); kFence(8, -13, 28, -13, 1.1);
   for (const mx of [-14, 12]) { kVis(0.1, 1.1, 0.1, mx, 0.55, -12.4, 0x5a4026, 0, 0.9); kVis(0.4, 0.3, 0.6, mx, 1.2, -12.4, 0x2f4f7a, 0.3, 0.5); }
-  mapTree(-28, -12, 1.1); mapTree(-2, -13.5, 1); mapTree(28, -17, 1.1); mapTree(-20, -37, 1);
+  mapTree(-28, -12, 1.1); mapTree(28, -17, 1.1); mapTree(-20, -37, 1);
   // shared yard between the houses: pool, deck, picnic table, shed, crates, playground, hoop
   kVis(9, 0.05, 6, 2, 0.02, -38, 0xb9b3a4, 0.05, 0.9); kVis(7, 0.07, 4, 2, 0.03, -38, 0x2f8fbf, 0.25, 0.12);
+  for (const [x, z, w, d] of [[2, -41.08, 9.0, 0.16], [2, -34.92, 9.0, 0.16], [-2.58, -38, 0.16, 6.0], [6.58, -38, 0.16, 6.0]]) kVis(w, 0.12, d, x, 0.1, z, 0xe6e0d1, 0.08, 0.8);
   addPaintedBox(-6, 0.75, -46, 2.2, 0.12, 1.0, 0x7a5a3a, 0, 0.9); addPaintedBox(-6, 0.4, -47.0, 2.2, 0.1, 0.4, 0x7a5a3a, 0, 0.9); addPaintedBox(-6, 0, -45.0, 0.2, 0.75, 0.9, 0x5a4026, 0, 0.9);
   addBox(24, 0, -38, 3, 2.4, 3, 0, "plaster"); kVis(3.6, 0.15, 3.6, 24, 2.48, -38, 0x4a5056, 0.4, 0.6);
   addBox(-2, 0, -42, 2.4, 1.2, 1.2, 0, "crate"); addBox(8, 0, -30, 1.2, 1.0, 2.4, 0, "crate"); addBox(-14, 0, -44, 2.6, 1.1, 1.1, 0, "crate"); addBox(-18, 0, -52, 1.2, 1.4, 3.0, 0, "wood"); addBox(0, 0, -56, 3.0, 0.9, 1.0, 0, "wood");
@@ -6937,6 +7038,21 @@ function buildSuburbMap() {   // Maple Court: small, fast, two houses across a c
 
 function buildTerminalMap() {   // Skyline Terminal: indoor departures hall with two mezzanines
   setBounds(26, -96, 12);
+  // Enclose the departures hall so it reads as a real indoor terminal rather than
+  // a collection of counters under open sky. Glass bays sit flush on the inner walls.
+  addBox(-26.4, 0, -42, 0.5, 10, 108, 0, "concrete"); addBox(26.4, 0, -42, 0.5, 10, 108, 0, "concrete");
+  addBox(0, 0, 12.4, 52, 10, 0.5, 0, "concrete"); addBox(0, 0, -96.4, 52, 10, 0.5, 0, "concrete");
+  addBox(0, 10, -42, 52, 0.45, 108, 0, "concrete");   // ceiling slab
+  for (const x of [-22, -14, 0, 14, 22]) {
+    kVis(0.34, 0.34, 108, x, 9.82, -42, 0x454c54, 0.62, 0.48);  // continuous roof trusses
+    kVis(0.18, 0.12, 98, x, 9.56, -42, 0xfff0c8, 0.05, 0.34);  // recessed light strips
+  }
+  for (const x of [-26.1, 26.1]) for (let z = -12; z >= -84; z -= 12) {
+    kVis(0.06, 4.1, 8.0, x, 4.8, z, 0x345565, 0.5, 0.24);
+    kVis(0.08, 0.1, 8.2, x, 2.72, z, 0xb6c5ce, 0.48, 0.42);
+    kVis(0.08, 0.1, 8.2, x, 6.88, z, 0xb6c5ce, 0.48, 0.42);
+  }
+  for (const x of [-16, -8, 8, 16]) kVis(0.05, 0.04, 98, x, 9.28, -42, 0x2d333b, 0.55, 0.42);
   for (const z of [-18, -42, -66, -90]) for (const x of [-14, 0, 14]) { addBox(x, 0, z, 1.5, 10, 1.5, 0, "concrete"); kVis(2.0, 0.4, 2.0, x, 0.2, z, 0x8c8f93, 0.2, 0.5); kVis(1.8, 0.25, 1.8, x, 1.0, z, 0xc9ccd0, 0.5, 0.3); }
   for (let z = -4; z > -92; z -= 8) for (const x of [-9, 9]) kVis(8, 0.02, 0.12, x, 0.02, z, 0x9aa0a6, 0.3, 0.5);   // floor seams
   // check-in islands: counters, monitors, hanging signs, belts, queue ropes
@@ -6948,7 +7064,7 @@ function buildTerminalMap() {   // Skyline Terminal: indoor departures hall with
   }
   // security lanes at the entrance: scanner tunnels, arches, trays
   for (const x of [-20, -14, 14, 20]) { addBox(x, 0, -8, 1.6, 1.1, 4, 0, "metal"); kVis(0.15, 2.3, 0.15, x - 0.7, 1.15, -6.4, 0x30343a, 0.5, 0.4); kVis(0.15, 2.3, 0.15, x + 0.7, 1.15, -6.4, 0x30343a, 0.5, 0.4); kVis(1.6, 0.15, 0.15, x, 2.3, -6.4, 0x30343a, 0.5, 0.4); kGlow(1.2, 0.05, 0.05, x, 2.2, -6.4, 0x55ff88); }
-  addBox(0, 0, -14, 4, 1.1, 4, 0, "concrete"); kVis(2.4, 1.4, 0.2, 0, 2.4, -14, 0x10161c, 0.4, 0.2); kGlow(2.2, 1.2, 0.05, 0, 2.4, -13.85, 0x2e8fff);   // information island
+  addBox(0, 0, -14, 4, 1.1, 4, 0, "concrete"); kVis(2.4, 1.4, 0.2, 0, 2.4, -14, 0x10161c, 0.4, 0.2); mapTerminalDisplay(2.2, 1.2, 0, 2.4, -13.85, 0, "INFORMATION");
   // seating blocks back to back
   for (const x of [-18, -8, 8, 18]) for (const z of [-52, -58]) { const f = z === -52 ? 1 : -1; addPaintedBox(x, 0, z, 5.5, 0.5, 1.0, 0x2b3a52, 0.1, 0.8); addPaintedBox(x, 0.5, z + f * 0.4, 5.5, 0.6, 0.2, 0x2b3a52, 0.1, 0.8); }
   // baggage carousel with luggage on the belt
@@ -6965,14 +7081,17 @@ function buildTerminalMap() {   // Skyline Terminal: indoor departures hall with
     for (const z of [-42, -54, -66]) wallRun("x", sx * 26, sx * 18, z, 0, 3.8, 0.25, "plaster", [vDoor(sx * 23, sx * 21)]);
     for (const z of [-36, -48, -60, -72]) { addPaintedBox(sx * 24.5, 0, z, 1.0, 1.0, 5, 0xcfd3d8, 0.2, 0.5); kGlow(0.1, 0.4, 3, sx * 25.9, 2.6, z, 0xfff0c8); }
     for (const z of [-34, -52, -70]) { addBox(mx, 4.25, z, 3, 0.9, 1.1, 0, "concrete"); kVis(2.6, 0.5, 0.9, mx, 5.4, z, 0x2f6b34, 0, 0.95); }   // planters on the deck
-    for (const z of [-30, -50, -70]) kGlow(0.2, 2.0, 8, sx * 25.8, 5.5, z, 0xffb02e);   // departure boards
+    for (const z of [-30, -50, -70]) {
+      kVis(0.18, 2.0, 8.0, sx * 25.8, 5.5, z, 0x16212a, 0.48, 0.32);
+      mapTerminalDisplay(8.0, 2.0, sx * 25.69, 5.5, z, -sx * Math.PI / 2, "GATE INFORMATION");
+    }
   }
   // cafe kiosk, planters, luggage carts, trolleys
   addBox(8, 0, -64, 4, 1.1, 3, 0, "metal"); kVis(4.2, 0.1, 3.2, 8, 1.15, -64, 0x6a4a2a, 0.2, 0.6); kVis(4, 0.9, 0.1, 8, 2.8, -62.6, 0x1b2a38, 0.5, 0.2); kGlow(3.4, 0.2, 0.1, 8, 3.4, -62.6, 0xffe3a0);
   for (const [x, z] of [[-4, -46], [4, -46], [-4, -88], [4, -88], [-2, -20], [2, -20]]) { addBox(x, 0, z, 3, 0.9, 1.2, 0, "concrete"); kVis(2.6, 0.55, 0.9, x, 1.15, z, 0x2f6b34, 0, 0.95); }
   for (const [x, z] of [[-2, -30], [12, -44], [-11, -68], [11, -84], [-12, -12]]) { addPaintedBox(x, 0, z, 1.8, 0.9, 0.7, 0x6e7378, 0.5, 0.4); addPaintedBox(x, 0.9, z, 1.0, 0.6, 0.6, 0x7a2f2f, 0.1, 0.8); }
   for (let i = 0; i < 6; i++) addBox(-16 + i * 6.5, 0, -93.5, 3.2, 1.3, 1.6, 0, "crate");   // freight along the back wall
-  kGlow(18, 3, 0.1, 0, 5.5, -95.8, 0x2e8fff); kVis(18.4, 3.4, 0.1, 0, 5.5, -95.9, 0x10161c, 0.4, 0.2);   // main departures board
+  kVis(18.4, 3.4, 0.1, 0, 5.5, -95.9, 0x10161c, 0.4, 0.2); mapTerminalDisplay(18, 3, 0, 5.5, -95.82, 0, "DEPARTURES");
 }
 
 function buildBazaarMap() {   // Old Bazaar: sandstone market street with enterable shops and roofs
@@ -6984,6 +7103,16 @@ function buildBazaarMap() {   // Old Bazaar: sandstone market street with entera
     const z1 = -4 - i * 22, z0 = z1 - 16, mz = (z0 + z1) / 2;
     mapBuilding(-22, -9, z0, z1, HW[i], "sandstone", { e: [vDoor(mz + 1, mz + 2.6), vWin(z0 + 2, z0 + 4), vWin(z1 - 4, z1 - 2)], n: [vWin(-19, -16.5), vWin(-13, -11)], s: [vWin(-19, -16.5), vWin(-13, -11)] }, true);
     mapBuilding(9, 22, z0, z1, HE[i], "sandstone", { w: [vDoor(mz - 2.6, mz - 1), vWin(z0 + 2, z0 + 4), vWin(z1 - 4, z1 - 2)], n: [vWin(11, 13.5), vWin(17, 20)], s: [vWin(11, 13.5), vWin(17, 20)] }, true);
+    mapWindow("z", z0 + 3, -9, 2.0, 1.0, 1.25, 1, 0xd2bd99);
+    mapWindow("z", z1 - 3, -9, 2.0, 1.0, 1.25, 1, 0xd2bd99);
+    mapWindow("z", z0 + 3, 9, 2.0, 1.0, 1.25, -1, 0xd2bd99);
+    mapWindow("z", z1 - 3, 9, 2.0, 1.0, 1.25, -1, 0xd2bd99);
+    const shopColors = [0x9b5632, 0x3c6170, 0x9a7a3d, 0x76513b, 0x45654a];
+    const leftDoorZ = mz + 1.8, rightDoorZ = mz - 1.8, signColor = shopColors[i];
+    kVis(0.12, 0.42, 2.8, -8.80, 2.72, leftDoorZ, signColor, 0.18, 0.66);
+    kVis(0.96, 0.12, 2.6, -8.35, 2.42, leftDoorZ, 0x5a402a, 0.12, 0.76);
+    kVis(0.12, 0.42, 2.8, 8.80, 2.72, rightDoorZ, signColor, 0.18, 0.66);
+    kVis(0.96, 0.12, 2.6, 8.35, 2.42, rightDoorZ, 0x5a402a, 0.12, 0.76);
     wallRun("x", -22, -9, mz, 0, HW[i] - 0.1, 0.25, "sandstone", [vDoor(-16, -14.4)]); wallRun("x", 9, 22, mz, 0, HE[i] - 0.1, 0.25, "sandstone", [vDoor(14.4, 16)]);
     roadStripe(-15, mz + 4, 4, 2.6, 0x8a2f2a); roadStripe(15, mz - 4, 4, 2.6, 0x2a4a7a);
     addPaintedBox(-20.5, 0, mz + 5, 2.0, 1.0, 1.0, 0x7a5a3a, 0, 0.9); addBox(-20.5, 0, mz - 4, 1.6, 1.2, 1.6, 0, "crate"); addPaintedBox(20.5, 0, mz - 5, 2.0, 1.0, 1.0, 0x7a5a3a, 0, 0.9); addBox(20.5, 0, mz + 4, 1.6, 1.2, 1.6, 0, "crate");
@@ -12239,11 +12368,13 @@ function animate(timestamp) {
   const rawDt = Math.min(clock.getDelta(), 0.05);
   updateScopeTransition(rawDt);
 
-  // The simulation only advances while the mouse is captured and a run is active.
-  // Esc (pause) freezes enemies, timers, reloads and the wave spawner together.
+  // Player input and weapon handling stop on the pause screen, but the world does not:
+  // enemies keep moving and can still hit a stationary player.
   const running = locked && roundActive;
+  const worldRunning = roundActive && (locked || menuMode === "pause");
   const dt = running ? rawDt : 0;
-  if (running) gameTime += rawDt * 1000;
+  const worldDt = worldRunning ? rawDt : 0;
+  if (worldRunning) gameTime += rawDt * 1000;
   const tNow = gameTime / 1000;
   updateGrenadeCooldownHud();
 
@@ -12461,15 +12592,15 @@ function animate(timestamp) {
   if (mouseDown && locked && w.auto && roundActive) shoot();
 
   // tactical AI updates
-  if (running) {
-    timeSinceWaveStart += dt;
-    updateWaveSpawning(dt);
+  if (worldRunning) {
+    timeSinceWaveStart += worldDt;
+    updateWaveSpawning(worldDt);
     coverBudget = 2;
     for (const e of enemies) {
-      if (e.userData.hp > 0 && !e.userData.sleep) enemyUpdate(e, dt, tNow);
+      if (e.userData.hp > 0 && !e.userData.sleep) enemyUpdate(e, worldDt, tNow);
     }
-    updateSelfHeal(dt);
-    updateMission(dt);
+    updateSelfHeal(worldDt);
+    updateMission(worldDt);
   }
 
   updateParticles(dt); updateBloodSprays(dt);
@@ -13166,6 +13297,58 @@ initDeathScreen();
 .ringBox b.low{color:var(--red);animation:pulse .7s infinite}
 .ldSlot{padding:10px 14px;border:1px dashed rgba(255,255,255,.25);font-size:11px;letter-spacing:.26em;color:#8a93a3;text-transform:uppercase;margin-bottom:8px}
 .ldSlot b{display:block;margin-top:3px;font-size:22px;letter-spacing:.08em;color:#fff}.ldSlot.f{border-style:solid;border-color:#ffb02e;background:rgba(255,176,46,.08)}
+.sh.loadout .shBody{
+  display:grid;grid-template-columns:minmax(0,1fr) minmax(270px,clamp(270px,24vw,330px));
+  gap:clamp(14px,1.6vw,24px);overflow:hidden;align-items:stretch
+}
+.sh.loadout .ldLeft{
+  min-height:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  grid-template-rows:minmax(205px,1.08fr) minmax(190px,.92fr);gap:14px;overflow:auto;
+  align-content:stretch;padding:2px 4px 8px 0
+}
+.sh.loadout .ldRow{flex:none;min-height:0}
+.sh.loadout .ldRow:first-child{grid-column:1/-1}
+.sh.loadout .ldRow:nth-child(2) .ldCards{grid-template-columns:repeat(2,minmax(0,1fr))}
+.sh.loadout .ldRow:nth-child(3) .ldCards{grid-template-columns:repeat(3,minmax(0,1fr))}
+.sh.loadout .ldCards{min-height:0;gap:10px}
+.sh.loadout .wCard{min-width:0;min-height:174px;padding:10px 12px;gap:6px}
+.sh.loadout .wCard img{flex:1;min-height:44px;max-height:86px}
+.sh.loadout .wCard .nm{font-size:clamp(15px,1.35vw,19px);line-height:1.12;overflow-wrap:anywhere}
+.sh.loadout .wStat{grid-template-columns:34px minmax(0,1fr);gap:7px;font-size:10px}
+.sh.loadout .ldRight{min-width:0;min-height:0;flex-basis:auto;overflow:auto}
+.sh.loadout .ldRight>.card{min-width:0}
+.sh.loadout .ldSlot{letter-spacing:.16em;line-height:1.3}
+.sh.loadout .ldSlot b{font-size:clamp(17px,1.6vw,21px);overflow-wrap:anywhere}
+@media(max-width:780px){
+  .shMain{min-height:0}
+  .sh.loadout .shBody{display:flex;flex-direction:column;flex:1;min-height:0;overflow:auto}
+  .sh.loadout .ldLeft{display:flex;flex-direction:column;overflow:visible;padding:0;gap:16px}
+  .sh.loadout .ldRow{flex:none;min-height:200px}
+  .sh.loadout .ldRow:first-child{grid-column:auto}
+  .sh.loadout .ldRight{flex:none;overflow:visible}
+  .sh.loadout .ldRight>.card{flex:none}
+}
+@media(max-width:560px){
+  .shSide{max-height:36%!important;padding:10px 14px;gap:8px}
+  .shBrand{padding:8px 10px}
+  .shBrand span{font-size:24px}
+  .shLbl{margin-top:0;font-size:9px}
+  .sdP{padding:6px 8px;font-size:13px;gap:6px}
+  .sdP i{height:18px}
+  .shSide>.mpBtn{padding:8px 14px;font-size:12px;min-height:40px}
+  .shMain{padding:12px 14px}
+  .shHead{margin:12px 0 10px;padding-bottom:10px}
+  .shHead h1{font-size:34px}
+  .steps span{padding:6px 10px 6px 16px;font-size:10px}
+  .sh.loadout .ldLeft{flex:none}
+  .sh.loadout .ldCards{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+  .sh.loadout .ldRow{min-height:190px}
+  .sh.loadout .wCard{min-height:176px;padding:9px}
+  .sh.loadout .wCard .nm{font-size:16px}
+  .sh.loadout .ldRight{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
+  .sh.loadout .ldRight .card{padding:12px}
+  .sh.loadout .ringBox svg{width:112px}
+}
 /* pause */
 .pRow{display:flex;justify-content:space-between;align-items:baseline;padding:9px 0;border-bottom:1px solid rgba(255,255,255,.08);font-size:17px;letter-spacing:.05em}
 .pRow span{font-size:11px;letter-spacing:.26em;text-transform:uppercase;color:#8a93a3}
@@ -13441,7 +13624,7 @@ body.mpNav #hud{top:204px}
   }
   function shell(step,title,sub,main,foot,top){
     const n=(mpState?.players||[]).length;
-    return `<div class="sh"><aside class="shSide"><div class="shBrand"><b>LOBBY CODE</b><span>${esc(mpState?.code||"")}</span></div>
+    return `<div class="sh${step===3?" loadout":""}"><aside class="shSide"><div class="shBrand"><b>LOBBY CODE</b><span>${esc(mpState?.code||"")}</span></div>
       <div class="shLbl">Players · ${n}</div><div class="shRoster" id="shRoster">${sideRoster()}</div>
       <button class="mpBtn danger" id="mpLeave">Leave lobby</button></aside>
       <section class="shMain"><div class="shTop"><div class="steps">${STEPS.map((x,i)=>`<span class="${i<step?"done":i===step?"on":""}">${x}</span>`).join("")}</div>${top||""}</div>
