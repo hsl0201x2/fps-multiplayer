@@ -9525,6 +9525,19 @@ function addBulletHole(p, n, sc) {
   if (bulletHoles.length > 120) scene.remove(bulletHoles.shift());
 }
 function clearBulletHoles() { for (const h of bulletHoles) scene.remove(h); bulletHoles.length = 0; }
+function raySphereHitDistance(origin, direction, center, radius) {
+  const magnitude = Math.hypot(direction.x, direction.y, direction.z);
+  if (!Number.isFinite(magnitude) || magnitude < 1e-8) return null;
+  const dx = direction.x / magnitude, dy = direction.y / magnitude, dz = direction.z / magnitude;
+  const ox = origin.x - center.x, oy = origin.y - center.y, oz = origin.z - center.z;
+  const projection = ox * dx + oy * dy + oz * dz;
+  const discriminant = projection * projection - (ox * ox + oy * oy + oz * oz - radius * radius);
+  if (discriminant < 0) return null;
+  const near = -projection - Math.sqrt(discriminant);
+  const far = -projection + Math.sqrt(discriminant);
+  if (near >= 0) return near;
+  return far >= 0 ? far : null;
+}
 function castBullet(origin, dir) {
   raycaster.set(origin, dir);
   raycaster.camera = camera;
@@ -9537,9 +9550,26 @@ function castBullet(origin, dir) {
   const grenadeTargets = liveGrenades.map(g => g.mesh).filter(mesh => mesh?.visible);
   const objects = enemies.concat(remoteTargets, grenadeTargets, obstacles);
   const hitsArr = raycaster.intersectObjects(objects, true);
+  let remoteCandidate = null;
+  if (window.__fpsVersusActive) {
+    const normalizedDir = dir.clone().normalize();
+    for (const avatar of remoteAvatarById.values()) {
+      const group = avatar.group;
+      if (group.userData.alive === false || !group.userData.team || group.userData.team === window.__fpsLocalTeam) continue;
+      const p = group.position;
+      for (const [part, offsetY, radius] of [["head", 1.56, 0.24], ["body", 1.02, 0.46], ["body", 0.40, 0.34]]) {
+        const distance = raySphereHitDistance(origin, normalizedDir, { x: p.x, y: p.y + offsetY, z: p.z }, radius);
+        if (distance === null || distance > raycaster.far || (remoteCandidate && distance >= remoteCandidate.distance)) continue;
+        const point = origin.clone().addScaledVector(normalizedDir, distance);
+        if (lineBlockedBySmoke(origin, point)) continue;
+        remoteCandidate = { type: "enemy", enemy: group, point, part, distance };
+      }
+    }
+  }
 
   for (const h of hitsArr) {
     if (h.object.type === "Sprite") continue;
+    if (remoteCandidate && remoteCandidate.distance <= h.distance) return remoteCandidate;
     let grenadeRoot=h.object;
     while(grenadeRoot&&!grenadeRoot.userData.liveGrenade)grenadeRoot=grenadeRoot.parent;
     if(grenadeRoot?.userData.liveGrenade)return {type:"grenade",grenade:grenadeRoot.userData.liveGrenade,point:h.point,normal:h.face?h.face.normal.clone().transformDirection(h.object.matrixWorld):null};
@@ -9555,6 +9585,7 @@ function castBullet(origin, dir) {
       return { type: "enemy", enemy: obj, point: h.point, part: part || "body" };
     }
   }
+  if (remoteCandidate) return remoteCandidate;
   if (dir.y < -0.01 && origin.y > 0) { const t = origin.y / -dir.y; if (t < 140) return { type: "miss", point: origin.clone().addScaledVector(dir, t), normal: new THREE.Vector3(0, 1, 0) }; }   // ground
   return { type: "miss", point: origin.clone().add(dir.clone().multiplyScalar(140)) };
 }
