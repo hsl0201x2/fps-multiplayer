@@ -17,13 +17,12 @@ const SKINS = new Set(["rifler", "shotgun", "sniper", "heavy"]);
 const MAPS = new Set([
   "courtyard", "ruins", "warehouse", "yard", "switchyard",
   "depot", "city", "desert", "mountain", "sea",
-  "suburb", "terminal", "bazaar",
 ]);
 const CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 const MAX_PLAYERS = 8;
 const MAX_POSITION = 10000;
 const STALE_MS = 15000;
-const PLAYER_FALL_MS = 450;   // round ends right after the (now faster) fall animation
+const PLAYER_FALL_MS = 800;
 
 function cleanProfile(raw = {}) {
   const username = String(raw.username || "Player")
@@ -590,28 +589,6 @@ io.on("connection", (socket) => {
     io.to(lobby.code).emit("players:snapshot", publicPlayers(lobby));
   });
 
-  // Relay shot tracers so other players can see versus fire. This is visual
-  // only; damage continues through the separately validated match:hit event.
-  socket.on("match:shot", (data = {}) => {
-    const lobby = getLobby(socket);
-    const shooter = lobby?.players.get(socket.id);
-    const weaponId = Number(data.weaponId);
-    const from = data.from;
-    const to = data.to;
-    if (!lobby || lobby.phase !== "playing" || !shooter?.alive) return;
-    if (!shooter.loadout?.includes(weaponId)) return;
-    if (!from || !to || ![from.x, from.y, from.z, to.x, to.y, to.z].every(Number.isFinite)) return;
-    if ([from.x, from.y, from.z, to.x, to.y, to.z].some((n) => Math.abs(n) > MAX_POSITION)) return;
-    const distance = Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z);
-    if (distance < 0.1 || distance > 500) return;
-    socket.to(lobby.code).emit("match:shot", {
-      playerId: socket.id,
-      weaponId,
-      from: { x: from.x, y: from.y, z: from.z },
-      to: { x: to.x, y: to.y, z: to.z },
-    });
-  });
-
   socket.on("match:utility", (data = {}) => {
     const lobby = getLobby(socket);
     const player = lobby?.players.get(socket.id);
@@ -684,7 +661,7 @@ io.on("connection", (socket) => {
       shooter.kills += 1;
       target.deaths += 1;
       io.to(lobby.code).emit("match:kill", {
-        killerId: shooter.id, victimId: target.id, killer: shooter.profile.username, killerTeam: shooter.team,
+        killer: shooter.profile.username, killerTeam: shooter.team,
         victim: target.profile.username, victimTeam: target.team,
         counts: teamCounts(lobby),
       });
@@ -707,7 +684,7 @@ io.on("connection", (socket) => {
     if (!player.alive) player.deaths += 1;
     sendLobby(lobby);
     if (!player.alive) {
-      io.to(lobby.code).emit("match:kill", { victimId: player.id, killer: null, killerTeam: null, victim: player.profile.username, victimTeam: player.team, fell: true, counts: teamCounts(lobby) });
+      io.to(lobby.code).emit("match:kill", { killer: null, killerTeam: null, victim: player.profile.username, victimTeam: player.team, fell: true, counts: teamCounts(lobby) });
       const mates = [...lobby.players.values()].filter((q) => q.team === player.team && q.alive);
       if (!mates.length) finishRoundAfterFall(lobby, player.team === "red" ? "blue" : "red");
     }
@@ -721,7 +698,7 @@ io.on("connection", (socket) => {
     p.hp = 0;
     p.alive = false;
     p.deaths += 1;
-    io.to(lobby.code).emit("match:kill", { victimId: p.id, killer: null, killerTeam: null, victim: p.profile.username, victimTeam: p.team, fell: true, counts: teamCounts(lobby) });
+    io.to(lobby.code).emit("match:kill", { killer: null, killerTeam: null, victim: p.profile.username, victimTeam: p.team, fell: true, counts: teamCounts(lobby) });
     sendLobby(lobby);
     const mates = [...lobby.players.values()].filter((q) => q.team === p.team && q.alive);
     if (!mates.length) finishRoundAfterFall(lobby, p.team === "red" ? "blue" : "red");
