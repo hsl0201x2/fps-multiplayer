@@ -9826,12 +9826,25 @@ function shoot() {
   let anyCrit = false;
   let totalDamage = 0;   // damage this shot actually dealt (drives knockback)
   const triggeredGrenades = new Set();
+  let versusTracerSent = false;
 
   for (let p = 0; p < w.pellets; p++) {
     const dir = getShotDirection(w.spread, true);
     const res = castBullet(camera.position.clone(), dir);
 
     spawnBullet(res.point);
+    if (window.__fpsVersusActive && !versusTracerSent && weaponGroup) {
+      const tip = MUZZLE_TIP[curWeaponNum] || MUZZLE_TIP[2];
+      const muzzle = weaponGroup.localToWorld(new THREE.Vector3(tip[0], tip[1], tip[2]));
+      const end = res.point;
+      addTracerColor(muzzle, end, 0xfff5c0, 0.75, 0.95, 3.2, 420);
+      multiplayerSocket.emit("match:shot", {
+        weaponId: curWeaponNum,
+        from: { x: muzzle.x, y: muzzle.y, z: muzzle.z },
+        to: { x: end.x, y: end.y, z: end.z },
+      });
+      versusTracerSent = true;
+    }
     if (res.normal) addBulletHole(res.point, res.normal, w.pellets > 1 ? 0.6 : 1);
 
     if (res.type === "grenade") {
@@ -13088,6 +13101,16 @@ initDeathScreen();
       updateLobbyInterface();
     });
     multiplayerSocket.on("players:snapshot", syncRemotePlayers);
+    multiplayerSocket.on("match:shot", (data = {}) => {
+      if (!window.__fpsVersusActive || data.playerId === multiplayerSocket.id) return;
+      const from = data.from, to = data.to;
+      if (!from || !to || ![from.x, from.y, from.z, to.x, to.y, to.z].every(Number.isFinite)) return;
+      addTracerColor(
+        new THREE.Vector3(from.x, from.y, from.z),
+        new THREE.Vector3(to.x, to.y, to.z),
+        0xfff5c0, 0.75, 0.95, 3.2, 420,
+      );
+    });
     multiplayerSocket.on("match:utility", (data = {}) => {
       if (!window.__fpsVersusActive || data.playerId === multiplayerSocket.id || !["frag","flash","smoke"].includes(data.type)) return;
       const p=data.position,v=data.velocity;
