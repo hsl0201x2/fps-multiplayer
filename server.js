@@ -590,6 +590,28 @@ io.on("connection", (socket) => {
     io.to(lobby.code).emit("players:snapshot", publicPlayers(lobby));
   });
 
+  // Relay shot tracers so other players can see versus fire. This is visual
+  // only; damage continues through the separately validated match:hit event.
+  socket.on("match:shot", (data = {}) => {
+    const lobby = getLobby(socket);
+    const shooter = lobby?.players.get(socket.id);
+    const weaponId = Number(data.weaponId);
+    const from = data.from;
+    const to = data.to;
+    if (!lobby || lobby.phase !== "playing" || !shooter?.alive) return;
+    if (!shooter.loadout?.includes(weaponId)) return;
+    if (!from || !to || ![from.x, from.y, from.z, to.x, to.y, to.z].every(Number.isFinite)) return;
+    if ([from.x, from.y, from.z, to.x, to.y, to.z].some((n) => Math.abs(n) > MAX_POSITION)) return;
+    const distance = Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z);
+    if (distance < 0.1 || distance > 500) return;
+    socket.to(lobby.code).emit("match:shot", {
+      playerId: socket.id,
+      weaponId,
+      from: { x: from.x, y: from.y, z: from.z },
+      to: { x: to.x, y: to.y, z: to.z },
+    });
+  });
+
   socket.on("match:utility", (data = {}) => {
     const lobby = getLobby(socket);
     const player = lobby?.players.get(socket.id);
