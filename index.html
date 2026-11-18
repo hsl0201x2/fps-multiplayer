@@ -12776,6 +12776,16 @@ initDeathScreen();
   <script>
     const multiplayerSocket = io();
     const remoteAvatarById = new Map();
+    // Dedicated, raycastable collision proxies for remote players. This keeps
+    // hits consistent despite animation and the detailed visual rig geometry.
+    const remoteHitMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffffff, colorWrite: false, depthWrite: false, transparent: true, opacity: 0,
+    });
+    const remoteHitGeometries = {
+      head: new THREE.SphereGeometry(0.20, 12, 8),
+      torso: new THREE.BoxGeometry(0.58, 0.88, 0.38),
+      legs: new THREE.BoxGeometry(0.46, 0.62, 0.34),
+    };
     let latestPlayersSnapshot = [];
     let lobbyPlayerSnapshots = [];
     let activeLobbyCode = null;
@@ -12806,6 +12816,19 @@ initDeathScreen();
       group.userData.alive = true;
       group.userData.hp = Number.isFinite(player.hp) ? player.hp : 100;
       group.userData.maxHp = Number.isFinite(PLAYER_MAX_HP) && PLAYER_MAX_HP > 0 ? PLAYER_MAX_HP : 100;
+      // Keep collision proxies visible to THREE.Raycaster while rendering
+      // nothing; this makes hits independent of the detailed animated rig.
+      for (const [part, geometry, y] of [
+        ["head", remoteHitGeometries.head, 1.56],
+        ["body", remoteHitGeometries.torso, 1.02],
+        ["body", remoteHitGeometries.legs, 0.40],
+      ]) {
+        const hitbox = new THREE.Mesh(geometry, remoteHitMaterial);
+        hitbox.position.y = y;
+        hitbox.userData.part = part;
+        hitbox.userData.remoteHitbox = true;
+        group.add(hitbox);
+      }
       group.userData.vel.set(0, 0, 0);
       group.userData.state = "engage";
       group.userData.aimT = 1;
