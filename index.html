@@ -1063,10 +1063,10 @@ function applyPerformanceSettings() {
 // -----------------------
 const weapons = {
   1: { name: "AWP",          type: "sniper",  auto: false, fireRate: 1150, magSize: 5,  reloadMs: 2600, pellets: 1, spread: 0,      bodyDmg: 120, headDmg: 240, scope: true  },
-  2: { name: "M4A1",         type: "rifle",   auto: true,  fireRate: 90,   magSize: 30, reloadMs: 2000, pellets: 1, spread: 0.008,  bodyDmg: 28,  headDmg: 52,  scope: false },
+  2: { name: "M4A1",         type: "rifle",   auto: true,  fireRate: 75,   magSize: 30, reloadMs: 2000, pellets: 1, spread: 0.008,  bodyDmg: 18,  headDmg: 36,  scope: false },
   3: { name: "Mossberg 500", type: "shotgun", auto: false, fireRate: 760,  magSize: 8,  reloadMs: 2950, pellets: 9, spread: 0.062,  bodyDmg: 14,  headDmg: 22,  scope: false },
   4: { name: "Glock 17",     type: "pistol",  auto: false, fireRate: 240,  magSize: 17, reloadMs: 1250, pellets: 1, spread: 0.014,  bodyDmg: 36,  headDmg: 60,  scope: false },
-  5: { name: "MP5",          type: "smg",     auto: true,  fireRate: 78,   magSize: 30, reloadMs: 2100, pellets: 1, spread: 0.018,  bodyDmg: 22,  headDmg: 40,  scope: false },
+  5: { name: "MP5",          type: "smg",     auto: true,  fireRate: 70,   magSize: 30, reloadMs: 2100, pellets: 1, spread: 0.018,  bodyDmg: 16,  headDmg: 32,  scope: false },
   6: { name: "Combat Knife", type: "melee",   auto: false, fireRate: 330,  magSize: 0,  reloadMs: 0,    pellets: 1, spread: 0,      bodyDmg: 50,  headDmg: 80, range: 2.4, scope: false }
 };
 let curWeaponNum = 1;
@@ -2834,7 +2834,7 @@ function updateHelpText() {
   const weaponKeys=window.__fpsVersusActive?`${k("slot1")}/${k("slot2")}`:`${k("slot1")}/${k("slot2")}/${k("slot3")}`;
   el.textContent =
     `Controls: ${k("forward")}${k("left")}${k("back")}${k("right")} move \u00B7 ${k("sprint")} sprint \u00B7 ${k("jump")} jump · ${k("crouch")} crouch \u00B7 ${k("slide")} slide \u00B7 ` +
-    `LMB shoot \u00B7 RMB scope (AWP) \u00B7 ${k("reload")} reload \u00B7 ${k("grenade")} throw utility (left hand) \u00B7 ${weaponKeys} weapons \u00B7 Wheel cycles · W/S climb/descend ladders · Esc menu · ${k("help")} hide this`;
+    `LMB shoot \u00B7 RMB scope (AWP) \u00B7 ${k("reload")} reload \u00B7 ${k("grenade")} ready utility, then click to throw (still: right hand, moving: left) \u00B7 ${weaponKeys} weapons \u00B7 Wheel cycles · W/S climb/descend ladders · Esc menu · ${k("help")} hide this`;
 }
 
 function crosshairHTML(s) {
@@ -4562,11 +4562,11 @@ function renderScopePreview() {
 function updateWeaponModelVisibility() {
   for (const model of Object.values(weaponModels)) model.visible = false;
   const selectedModel = weaponModels[curWeaponNum];
-  if (selectedModel && !grenadeEquipped) selectedModel.visible = true;
+  if (selectedModel && (!grenadeEquipped || !throwState)) selectedModel.visible = true;
   if (grenadeView && !throwState) {
-    grenadeView.group.visible = grenadeEquipped && grenades > 0;
-    grenadeView.nade.visible = grenades > 0;
-    if (grenadeEquipped && grenades > 0) setGrenadeHoldPose();
+    // The utility key only readies the throw; show the hand and grenade after a click starts the animation.
+    grenadeView.group.visible = false;
+    grenadeView.nade.visible = false;
   }
   if (grenadeEquipped) {
     weaponTextEl.textContent = `${UTILITY_TYPES[utilityType].name} ×${grenades}`;
@@ -7579,6 +7579,7 @@ let throwReleased = false;
 let grenadeCooldownUntil = 0;
 let grenadeView = null;       // { group, hand, nade }: the grenade and hand you see in first person
 let grenadeEquipped = false;
+let grenadeThrowHand = "left";
 const liveGrenades = [];      // grenades in flight / rolling, waiting for the fuse
 let utilityProjectileSeq = 0;
 const blasts = [];            // explosion visuals
@@ -7662,10 +7663,24 @@ function placeArmSegment(mesh, from, to) {
   mesh.scale.y = length;
 }
 
+function setGrenadeThrowHand(side) {
+  grenadeThrowHand = side === "right" ? "right" : "left";
+  const hand = grenadeView?.hand;
+  if (!hand) return;
+  const isLeft = grenadeThrowHand === "left", oldRig = hand.userData.armRig;
+  if (oldRig && !!hand.userData.isLeft !== isLeft) {
+    if (viewArms) viewArms.remove(oldRig.root);
+    hand.userData.armRig = null;
+  }
+  hand.userData.isLeft = isLeft;
+  hand.scale.x = isLeft ? -1 : 1;
+}
+
 function applyGrenadeArmPose(pose) {
   if (!grenadeView) return;
-  const elbow = new THREE.Vector3(-pose[0], pose[1], pose[2]);   // left arm: the stored right-arm toss is mirrored
-  const wrist = new THREE.Vector3(-pose[3], pose[4], pose[5]);
+  const mirror = grenadeThrowHand === "left" ? -1 : 1;
+  const elbow = new THREE.Vector3(mirror * pose[0], pose[1], pose[2]);
+  const wrist = new THREE.Vector3(mirror * pose[3], pose[4], pose[5]);
   placeArmSegment(grenadeView.upperArm, GRENADE_SHOULDER, elbow);
   placeArmSegment(grenadeView.forearm, elbow, wrist);
   grenadeView.elbowJoint.position.copy(elbow);
@@ -7682,7 +7697,7 @@ function setGrenadeHandOpen(o) {
 
 function setGrenadeHoldPose() {
   if (!grenadeView) return;
-  grenadeView.group.position.set(-0.36, -0.43, -0.52);
+  grenadeView.group.position.set(grenadeThrowHand === "left" ? -0.36 : 0.36, -0.43, -0.52);
   grenadeView.group.rotation.set(0, 0, 0);
   applyGrenadeArmPose(GRENADE_HOLD_POSE);
 }
@@ -7740,6 +7755,7 @@ function setupGrenadeView() {
   group.add(upperArm, forearm, elbowJoint, wristJoint, hand);
   camera.add(group);
   grenadeView = { group, upperArm, forearm, elbowJoint, wristJoint, hand, nade };
+  setGrenadeThrowHand(grenadeThrowHand);
   setGrenadeHoldPose();
 }
 
@@ -7864,10 +7880,13 @@ function tryThrowGrenade(mode = "over") {
   reloading = false;                // throwing interrupts a reload, like switching weapons does
   throwState = { t: 0, mode };
   throwReleased = false;
+  updateWeaponModelVisibility(); // hide the gun only once the throw animation begins
+  // Choose the active arm when the throw starts: actual momentum distinguishes moving from standing still.
+  setGrenadeThrowHand(Math.hypot(pVel.x, pVel.z) > 0.25 ? "left" : "right");
   if (grenadeView) {
     grenadeView.group.visible = true;
     grenadeView.nade.visible = true;
-    grenadeView.group.position.set(-0.36, -0.43, -0.52);
+    grenadeView.group.position.set(grenadeThrowHand === "left" ? -0.36 : 0.36, -0.43, -0.52);
     grenadeView.group.rotation.set(0, 0, 0);
     applyGrenadeArmPose(THROW_KEYS[0].slice(1)); setGrenadeHandOpen(0);
   }
@@ -7911,7 +7930,7 @@ function releaseGrenade(mode = "over") {
   const fwd = new THREE.Vector3();
   camera.getWorldDirection(fwd);
   const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
-  const start = camera.position.clone().addScaledVector(fwd, 0.5).addScaledVector(right, -0.2);
+  const start = camera.position.clone().addScaledVector(fwd, 0.5).addScaledVector(right, grenadeThrowHand === "left" ? -0.2 : 0.2);
   start.y -= 0.18;
   if (grenadeHitsBox(start)) start.copy(camera.position);   // pressed against a wall: let go from the eye instead
   const dir = fwd.clone();
@@ -7927,7 +7946,7 @@ function releaseGrenade(mode = "over") {
     (after[4] - before[4]) / (2 * sampleDt),
     (after[5] - before[5]) / (2 * sampleDt)
   ).applyQuaternion(camera.quaternion).multiplyScalar(mode === "under" ? 0 : 0.10);
-  const launchVelocity = dir.multiplyScalar(mode === "under" ? 8.5 : GRENADE.throwSpeed).add(armVelocity);
+  const launchVelocity = dir.multiplyScalar(mode === "under" ? 17.0 : GRENADE.throwSpeed).add(armVelocity);
   grenadeCooldownUntil = gNow() + utility.cooldown * 1000;
 
   const s = GR_R / 0.042;
@@ -9791,10 +9810,29 @@ function startKnifeAttack(isAlt = false) {
   updateHUD();
 }
 
+function castKnifeAimAssist(origin) {
+  const forward = getShotDirection(0);
+  const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+  const up = new THREE.Vector3().crossVectors(right, forward).normalize();
+  // A compact 9-ray fan gives knife swings a forgiving nearby target area without bypassing walls.
+  const offsets = [[0, 0], [0.18, 0], [-0.18, 0], [0, 0.18], [0, -0.18], [0.13, 0.13], [0.13, -0.13], [-0.13, 0.13], [-0.13, -0.13]];
+  let centerHit = null, bestEnemy = null, bestDistance = Infinity;
+  for (let i = 0; i < offsets.length; i++) {
+    const [x, y] = offsets[i];
+    const direction = forward.clone().addScaledVector(right, x).addScaledVector(up, y).normalize();
+    const hit = castBullet(origin, direction);
+    if (i === 0) centerHit = hit;
+    if (hit.type === "enemy" && hit.point.distanceTo(origin) < bestDistance) {
+      bestEnemy = hit; bestDistance = hit.point.distanceTo(origin);
+    }
+  }
+  return bestEnemy || centerHit || { type: "miss" };
+}
+
 function resolveKnifeAttack(isAlt) {
   const w = weapons[curWeaponNum];
   const origin = camera.position.clone();
-  const hit = castBullet(origin, getShotDirection(0));
+  const hit = castKnifeAimAssist(origin);
   // one short screen shake as the blade lands: small for the quick slash, a bit bigger for the heavy attack
   shakeAmp = 0;
   shakeT = SHAKE_DURATION * (isAlt ? 1.3 : 1.0);
@@ -11919,10 +11957,10 @@ function setGrenadeEquipped(on) {
     reloading = false;
   }
   updateWeaponModelVisibility();
-  updateHUD(on ? (grenades > 0 ? UTILITY_TYPES[utilityType].name + " ready — left click: overhand · right click: underhand" : "No " + UTILITY_TYPES[utilityType].shortName.toLowerCase() + " charges") : "Ready");
+  updateHUD(on ? (grenades > 0 ? UTILITY_TYPES[utilityType].name + " ready — click to throw; still: right hand · moving: left hand" : "No " + UTILITY_TYPES[utilityType].shortName.toLowerCase() + " charges") : "Ready");
 }
 
-function toggleGrenadeReady() {   // grenade key: ready / lower the bomb; then LMB = overhand, RMB = underhand
+function toggleGrenadeReady() {   // grenade key readies the utility; LMB = overhand, RMB = underhand; the model appears on click
   if (!roundActive || dying || throwState || swapping) return;
   if (grenadeEquipped) { setGrenadeEquipped(false); return; }
   const nm = UTILITY_TYPES[utilityType].shortName.toLowerCase();
@@ -13110,7 +13148,8 @@ initDeathScreen();
             tag.visible=!lineBlockedBySmoke(camera.position,tagWorld);
           }
           if (g.userData.dying) {
-            if (!locked || !roundActive) updateDyingEnemies(dt, g);
+            // Corpse motion is cosmetic and must keep running during active, pointer-locked play.
+            updateDyingEnemies(dt, g);
             continue;
           }
           const k = 1 - Math.exp(-dt * 16);
@@ -13291,8 +13330,14 @@ initDeathScreen();
 /* ===== menu shell (mode / setup / ready / loadout / pause) ===== */
 #mpModal{background:transparent}
 #mpModal::before{content:"";position:absolute;inset:0;background:var(--bg,#03080d);opacity:1;transition:opacity .9s ease;pointer-events:none}
-#mpModal.splash{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#0c3342 0%,#07202b 45%,#03080d 100%)}
-#mpModal.splash::before{opacity:.7}
+#mpModal.splash{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#0c3342 0%,#07202b 45%,#03080d 100%);backdrop-filter:blur(4px) brightness(.62);-webkit-backdrop-filter:blur(4px) brightness(.62)}
+/* Hold on black before revealing the large round/match result title. */
+#mpModal.splash-intro{--bg:#000;background:#000}
+#mpModal.splash-intro::before{background:#000;opacity:1;transition:none}
+#mpModal.splash-intro .spl{animation:none}
+#mpModal.splash-intro .spl::before,#mpModal.splash-intro .spl::after{display:none}
+#mpModal.splash-intro .splT{opacity:0;animation:none}
+#mpModal.splash::before{opacity:.76}
 #mpModal.win{--bg:radial-gradient(ellipse 70% 60% at 0% 0%,#10566e,transparent 60%),linear-gradient(180deg,#04090e,#02050a)}
 #mpModal.loss{--bg:radial-gradient(ellipse 70% 60% at 0% 0%,#78241a,transparent 60%),linear-gradient(180deg,#0a0504,#040202)}
 #mpModal.draw{--bg:radial-gradient(ellipse 70% 60% at 0% 0%,#6e5a14,transparent 60%),linear-gradient(180deg,#090804,#030302)}
@@ -13300,7 +13345,7 @@ initDeathScreen();
 #mpModal.splash.draw{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#4a3c12 0%,#241d0a 45%,#070603 100%)}
 #mpModal.splash.loss{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#4a1a12 0%,#2a0f0b 45%,#070302 100%)}
 #mpModal.win::before,#mpModal.loss::before,#mpModal.draw::before{opacity:.9}
-#mpModal.splash.win::before,#mpModal.splash.loss::before,#mpModal.splash.draw::before{opacity:.7}
+#mpModal.splash.win::before,#mpModal.splash.loss::before,#mpModal.splash.draw::before{opacity:.76}
 #mpModal.screen{--bg:linear-gradient(135deg,#0d1118 0%,#080a10 55%,#05070b 100%)}
 #mpModal.screen::after{content:"";position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(135deg,rgba(255,176,46,.035) 0 2px,transparent 2px 16px)}
 #mpModal.screen.pause{backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
@@ -13449,14 +13494,11 @@ initDeathScreen();
 .spl{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden;cursor:pointer;animation:splOut .28s ease-in .88s forwards}
 .spl::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(0deg,rgba(255,255,255,.04) 0 1px,transparent 1px 4px),radial-gradient(circle,rgba(255,255,255,.08) 1px,transparent 1.5px) 0 0/9px 9px;opacity:.55;animation:scan 6s linear infinite}
 .spl::after{content:"";position:absolute;inset:0;background:radial-gradient(ellipse at center,transparent 50%,rgba(0,0,0,.45) 100%);pointer-events:none}
-.splT{position:relative;z-index:2;font-size:clamp(56px,14vw,210px);font-weight:800;line-height:1;letter-spacing:.02em;text-transform:uppercase;color:#fff;text-shadow:0 0 40px rgba(180,230,255,.35);animation:splIn .34s cubic-bezier(.15,.9,.2,1) both,glitch 1s .34s steps(1) 1}
-.spl.loss .splT{text-shadow:0 0 40px rgba(255,110,80,.4)}
+.splT{position:relative;z-index:2;font-size:clamp(48px,11vw,175px);font-weight:800;line-height:1;letter-spacing:.02em;text-transform:uppercase;color:#fff;text-shadow:0 0 34px rgba(180,230,255,.3);animation:splIn .34s cubic-bezier(.15,.9,.2,1) both,glitch 1.35s .34s steps(1) 1}
+.spl.loss .splT{text-shadow:0 0 34px rgba(255,110,80,.35)}
 .splT::before,.splT::after{content:attr(data-t);position:absolute;left:0;top:0;width:100%;overflow:hidden;opacity:0}
-.splT::before{color:#7fe4ff;animation:gl1 1s .34s steps(1) 1}
-.splT::after{color:#ff6b6b;animation:gl2 1s .34s steps(1) 1}
-.splD{position:absolute;z-index:2;left:0;bottom:-.34em;height:.12em;width:100%;display:flex;gap:.06em;font-size:inherit;opacity:.85}
-.splD i{display:block;height:100%;background:repeating-linear-gradient(90deg,#fff 0 .025em,transparent .025em .05em),repeating-linear-gradient(0deg,#000 0 .03em,transparent .03em .06em);background-blend-mode:multiply;animation:ditherIn .28s .2s both}
-.splD i:nth-child(1){width:.12em}.splD i:nth-child(2){width:.12em}.splD i:nth-child(3){width:.28em;margin-left:.06em}
+.splT::before{color:#7fe4ff;animation:gl1 1.35s .34s steps(1) 1}
+.splT::after{color:#ff6b6b;animation:gl2 1.35s .34s steps(1) 1}
 /* ===== round result scoreboard ===== */
 .rs{position:absolute;inset:0;display:flex;flex-direction:column;padding:clamp(14px,3vh,34px) clamp(18px,3.5vw,56px) 0;overflow:hidden}
 #mpModal.loss .scrTitle{color:#ffd0c4;text-shadow:0 0 30px rgba(255,100,70,.3)}
@@ -13509,10 +13551,9 @@ initDeathScreen();
 @keyframes splIn{from{opacity:0;transform:scale(1.35);letter-spacing:.14em;filter:blur(10px)}to{opacity:1;transform:none;filter:none}}
 @keyframes splOut{to{opacity:0}}
 @keyframes scan{to{background-position:0 120px,0 0}}
-@keyframes ditherIn{from{opacity:0;transform:translateX(-30px)}to{opacity:1;transform:none}}
-@keyframes glitch{0%,100%{transform:none}8%{transform:translate(-6px,2px)}9%{transform:translate(5px,-2px)}10%{transform:none}52%{transform:translate(8px,0) skewX(8deg)}54%{transform:none}}
-@keyframes gl1{0%,100%{opacity:0}8%{opacity:.85;clip-path:inset(10% 0 60% 0);transform:translate(-9px,0)}9%{opacity:.85;clip-path:inset(55% 0 12% 0);transform:translate(7px,0)}10%{opacity:0}52%{opacity:.8;clip-path:inset(30% 0 35% 0);transform:translate(10px,0)}54%{opacity:0}}
-@keyframes gl2{0%,100%{opacity:0}8%{opacity:.8;clip-path:inset(60% 0 8% 0);transform:translate(9px,0)}9%{opacity:.8;clip-path:inset(5% 0 70% 0);transform:translate(-8px,0)}10%{opacity:0}53%{opacity:.75;clip-path:inset(45% 0 25% 0);transform:translate(-10px,0)}55%{opacity:0}}
+@keyframes glitch{0%,100%{transform:none}7%{transform:translate(-10px,2px) skewX(-2deg)}8%{transform:translate(8px,-3px)}9%{transform:none}34%{transform:translate(0,0)}35%{transform:translate(12px,1px) skewX(5deg)}36%{transform:translate(-7px,-2px)}37%{transform:none}66%{transform:translate(-9px,0) skewX(-4deg)}68%{transform:translate(5px,1px)}70%{transform:none}}
+@keyframes gl1{0%,100%{opacity:0}7%{opacity:.95;clip-path:inset(10% 0 60% 0);transform:translate(-13px,0)}8%{opacity:.9;clip-path:inset(55% 0 12% 0);transform:translate(11px,0)}9%{opacity:0}35%{opacity:.9;clip-path:inset(30% 0 35% 0);transform:translate(14px,1px)}37%{opacity:0}66%{opacity:.85;clip-path:inset(65% 0 10% 0);transform:translate(-12px,0)}68%{opacity:0}}
+@keyframes gl2{0%,100%{opacity:0}7%{opacity:.9;clip-path:inset(60% 0 8% 0);transform:translate(12px,0)}8%{opacity:.9;clip-path:inset(5% 0 70% 0);transform:translate(-11px,0)}9%{opacity:0}35%{opacity:.85;clip-path:inset(45% 0 25% 0);transform:translate(-14px,-1px)}37%{opacity:0}66%{opacity:.9;clip-path:inset(12% 0 62% 0);transform:translate(10px,0)}68%{opacity:0}}
 @keyframes pulse{50%{opacity:.35}}
 @media(prefers-reduced-motion:reduce){.spl,.splT,.scr,.rsRow,.wCard{animation-duration:.01s!important}}
 #mpBanner{position:fixed;left:50%;bottom:9vh;transform:translateX(-50%);z-index:9000;display:flex;align-items:center;gap:16px;padding:10px 20px;background:rgba(6,10,16,.55);border:1px solid rgba(255,255,255,.14);border-left:4px solid #ff5a5a;font-family:Bahnschrift,"Arial Narrow",Arial,sans-serif;letter-spacing:.18em;text-transform:uppercase;color:#eef3f8;backdrop-filter:blur(6px)}
@@ -13538,6 +13579,9 @@ body.mpNav #hud{top:204px}
 .mpProfileCard{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;margin:10px 0 16px;padding:16px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.12);border-radius:12px}
 .mpProfileCard label{align-self:end;color:#d6e0ed}.mpProfileCard input,.mpProfileCard select{box-sizing:border-box;min-width:0;padding:10px;border-radius:8px;border:1px solid #53627a;background:#0e131b;color:white}
 @media(max-width:560px){.mpProfileCard{grid-template-columns:1fr}.mpProfileCard label{margin-bottom:-6px}}
+@media(max-width:560px){.shBody .mTile{min-width:0;padding:14px 11px}.mTile svg{width:clamp(56px,10vh,82px);height:clamp(56px,10vh,82px);margin:0 0 12px}.mTile b{font-size:clamp(20px,6vw,28px);letter-spacing:.04em}.mTile p{font-size:13px;line-height:1.35}.chips{gap:5px;min-height:52px}.chips span{padding:3px 6px;font-size:9px;letter-spacing:.1em}}
+@media(max-width:780px){.sh:not(.loadout) .shBody{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;overflow:auto}.sh:not(.loadout) .shBody>.card{min-height:190px}.sh:not(.loadout) .shBody>div[style*="display:flex"]{grid-column:1/-1;display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;min-width:0}.sh:not(.loadout) .shBody>div[style*="display:flex"] .card{min-width:0}}
+@media(max-width:560px){.mpRows{grid-template-columns:minmax(0,1fr) 76px;gap:6px;font-size:13px}.mpRows select{padding:7px 4px;font-size:12px;letter-spacing:.06em}}
 </style>
 <div id="mpHud" hidden></div><div id="mpCount"></div><div id="mpFeed"></div><div id="mpBanner" hidden></div>
 <div id="mpModal" hidden><div id="mpCard"><div id="mpContent"></div></div></div>
@@ -13688,10 +13732,12 @@ body.mpNav #hud{top:204px}
     const c=k.counts;
     if(c[my].total+c[ot].total<2)return;
     const prev=lastCounts||{[my]:{alive:c[my].total},[ot]:{alive:c[ot].total}};
+    lastCounts={[my]:{alive:c[my].alive},[ot]:{alive:c[ot].alive}};
+    // The kill that wipes a team ends the round; don't flash a distracting 1 VS 0.
+    if(c[my].alive===0||c[ot].alive===0){cntEl.classList.remove("show");cntEl.innerHTML="";return;}
     const dropF=c[my].alive<prev[my].alive,dropE=c[ot].alive<prev[ot].alive;
     cntEl.innerHTML=`<div class="n f ${dropF?"drop":""}">${c[my].alive}</div><div class="vs">VS</div><div class="n e ${dropE?"drop":""}">${c[ot].alive}</div>`;
     cntEl.classList.remove("show");void cntEl.offsetWidth;cntEl.classList.add("show");
-    lastCounts={[my]:{alive:c[my].alive},[ot]:{alive:c[ot].alive}};
   }
   function addKill(k){
     if(k.victimId)(window.__fpsKillerOf||(window.__fpsKillerOf=new Map())).set(k.victimId,k.killerId||null);
@@ -13729,7 +13775,7 @@ body.mpNav #hud{top:204px}
     show(shell(1,"Game <u>mode</u>",h?"Choose what everyone in the lobby plays next":"The lobby host is choosing a game mode",
       `<button class="mTile" id="mpCoop" ${dis}>${ICON_COOP}<b>Co-op</b><p>Team up and play together. Everyone spawns side by side and fights as one squad.</p><div class="chips"><span>Squad play</span><span>Shared spawn</span><span>Up to 8</span></div></button>
        <button class="mTile v" id="mpVersus" ${dis}>${ICON_VS}<b>Versus</b><p>Red against Blue in a round-based match. Pick your weapons, then fight to win the most rounds.</p><div class="chips"><span>Red vs Blue</span><span>Loadouts</span><span>Ready each round</span></div></button>`,
-      `${h?'<button class="mpBtn" id="mpCancel">Back</button>':statusLine("Waiting for the lobby host…")}`),"screen");
+      `${h?'<button class="mpBtn" id="mpCancel">Back to lobby</button>':statusLine("Waiting for the lobby host…")}`),"screen");
     wireLeave();wireCancel();
     $("mpCoop")?.addEventListener("click",async()=>{const r=await request("match:mode","coop");if(!r.ok)alert(r.error);});
     $("mpVersus")?.addEventListener("click",async()=>{const r=await request("match:mode","versus");if(!r.ok)alert(r.error);});
@@ -13768,7 +13814,7 @@ body.mpNav #hud{top:204px}
          <div class="fld"><label for="mpHealth">Player health</label><select id="mpHealth" ${dis}>${[50,100,150,200,300,500].map(n=>`<option value="${n}" ${n===d.health?"selected":""}>${n} HP</option>`).join("")}</select></div>
          <div class="mapBig"><div class="big3"><div><b>${need}</b><span>Wins needed</span></div></div><p>First team to ${need} round win${need===1?"":"s"} takes the match. Everyone picks 2 weapons before it starts.</p></div></div>
        <div style="flex:2.3;display:flex;gap:clamp(12px,1.6vw,24px);min-width:0">${teamCols(players,d,h)}</div>`,
-      h?'<button class="mpBtn primary" id="mpStart">Start match</button><button class="mpBtn" id="mpCancel">Back</button>':statusLine("Waiting for the host to start the match…")),"screen");
+      h?'<button class="mpBtn primary" id="mpStart">Start match</button><button class="mpBtn" id="mpCancel">Back to modes</button>':statusLine("Waiting for the host to start the match…")),"screen");
     wireLeave();wireCancel();
     if(h){
       content.querySelectorAll("select").forEach(el=>el.addEventListener("change",()=>{
@@ -13790,8 +13836,8 @@ body.mpNav #hud{top:204px}
     show(shell(2,"Match <u>ready</u>",host()?"Start the match — everyone picks a loadout next":"Waiting for the host to start",
       `<div class="card" style="flex:1.3"><h3>Match</h3><div class="big3"><div><b>${c.rounds||5}</b><span>Rounds</span></div><div><b>${c.health||100}</b><span>HP</span></div><div><b>${players.length}</b><span>Players</span></div></div>
         <div class="mapBig"><b>${esc(mi.name||"Map")}</b><small>${esc(mi.size||"")}</small><p>${esc(mi.desc||"")}</p></div></div>${tm("red")}${tm("blue")}`,
-      host()?'<button class="mpBtn primary" id="mpStart">Start match</button>':statusLine("Waiting for the host to start the match…")),"screen");
-    wireLeave();$("mpStart")?.addEventListener("click",async()=>{const r=await request("match:start");if(!r.ok)alert(r.error);});
+      host()?'<button class="mpBtn primary" id="mpStart">Start match</button><button class="mpBtn" id="mpCancel">Back to modes</button>':statusLine("Waiting for the host to start the match…")),"screen");
+    wireLeave();wireCancel();$("mpStart")?.addEventListener("click",async()=>{const r=await request("match:start");if(!r.ok)alert(r.error);});
   }
 
   // ---------- loadout screen ----------
@@ -13883,9 +13929,11 @@ body.mpNav #hud{top:204px}
   function showResult(data){
     const r=resultInfo(data);
     clearInterval(countdownTimer);hideBanner();hudEl.hidden=true;
-    show(`<div class="spl ${r.kind}" id="mpSplash"><div class="splT" data-t="${r.title}">${r.title}<div class="splD"><i></i><i></i><i></i></div></div></div>`,"splash "+r.kind);
+    show(`<div class="spl ${r.kind}" id="mpSplash"><div class="splT" data-t="${r.title}">${r.title}</div></div>`,"splash-intro "+r.kind);
     $("mpSplash").addEventListener("click",()=>goScore());
-    clearTimeout(stageTimer);stageTimer=setTimeout(goScore,1320);
+    const revealDelay=matchMedia("(prefers-reduced-motion: reduce)").matches?80:450;
+    setTimeout(()=>{if(modal.classList.contains("splash-intro")){modal.classList.remove("splash-intro");modal.classList.add("splash");}},revealDelay);
+    clearTimeout(stageTimer);stageTimer=setTimeout(goScore,1650);
   }
   function goScore(){
     clearTimeout(stageTimer);
