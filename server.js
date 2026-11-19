@@ -23,7 +23,7 @@ const CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 const MAX_PLAYERS = 8;
 const MAX_POSITION = 10000;
 const STALE_MS = 15000;
-const PLAYER_FALL_MS = 450;   // round ends right after the (now faster) fall animation
+const PLAYER_FALL_MS = 700;   // let the local and remote death falls finish before showing the round result
 
 function cleanProfile(raw = {}) {
   const username = String(raw.username || "Player")
@@ -451,16 +451,22 @@ io.on("connection", (socket) => {
     ack(callback, { ok: true, state: lobbyState(lobby) });
   });
 
-  // Host cancels setup and returns everyone to the plain lobby.
+  // Back from versus setup returns to mode selection; Back there returns to the lobby.
   socket.on("lobby:cancel", (_d, callback) => {
     const lobby = getLobby(socket);
     if (!lobby || lobby.hostId !== socket.id) return ack(callback, { ok: false, error: "Only the host can do that." });
-    if (!["mode-select", "versus-setup", "versus-ready"].includes(lobby.phase)) return ack(callback, { ok: false });
-    lobby.phase = "lobby";
+    if (lobby.phase === "mode-select") {
+      lobby.phase = "lobby";
+    } else if (["versus-setup", "versus-ready"].includes(lobby.phase)) {
+      lobby.phase = "mode-select";
+    } else {
+      return ack(callback, { ok: false });
+    }
     lobby.mode = null;
+    lobby.config = null;
     lobby.draft = null;
     sendLobby(lobby);
-    ack(callback, { ok: true });
+    ack(callback, { ok: true, state: lobbyState(lobby) });
   });
 
   // Host's live (unsaved) versus choices, shown read-only to everyone else.
