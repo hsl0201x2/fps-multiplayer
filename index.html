@@ -70,15 +70,18 @@
     position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
     width: 44px; height: 44px; z-index: 30; pointer-events: none;
   }
-  #crosshair .line { position:absolute; background: var(--ch-color, #4dff88); box-shadow: 0 0 4px #000; }
+  #crosshair .line { position:absolute; background: var(--ch-color, #ffffff); }
+  #crosshair .ch-fire-x, #chPreview .ch-fire-x { display:none; }
+  #crosshair.show-fire-x.shooting .ch-arm,
+  #crosshair.show-fire-x.shooting .ch-shape { display:none; }
+  #crosshair.show-fire-x.shooting .ch-fire-x { display:block; }
   #crosshair .dot {
     position:absolute;
     width: var(--ch-dot, 0px); height: var(--ch-dot, 0px);
     border-radius: 50%;
-    background: var(--ch-color, #4dff88);
+    background: var(--ch-color, #ffffff);
     left:50%; top:50%;
     transform: translate(-50%, -50%);
-    box-shadow: 0 0 4px #000;
   }
 
   /* Hitmarker X */
@@ -778,10 +781,14 @@ const particles = [];
 // -----------------------
 // Settings + Map selector
 // -----------------------
-const DEFAULT_CROSSHAIR = { style: "cross", size: 22, thickness: 2, gap: 7, color: "#4dff88", dot: false, dotSize: 4, opacity: 1, outline: true, dynamic: false };
+const DEFAULT_CROSSHAIR = {
+  style: "cross", size: 22, thickness: 1, gap: 9, lineLength: 6,
+  color: "#ffffff", dot: true, dotSize: 4, opacity: 1, outline: false, dynamic: true,
+  showXWhileShooting: true, shootXDuration: 150, xLength: 16, xThickness: 1, xAngle: 30,
+};
 const settings = {
   crosshair: { ...DEFAULT_CROSSHAIR },
-  gunSway: 1, zoomIron: 1.25, zoomDot: 1.3, adsSensGun: 0.8, adsSpeed: 0.8,
+  gunSway: 1, zoomIron: 1.25, zoomDot: 1.25, adsSensGun: 0.8, adsSpeed: 0.8,
   sights: { 2: "iron", 3: "iron", 4: "iron", 5: "iron" },
   map: "yard", // yard, depot, ruins
   mode: "survival",      // "survival" | "missions"
@@ -792,6 +799,8 @@ const settings = {
   spawnDelayMs: 260,     // stagger spawns so it doesn't feel like instant swarm
   tactical: true,
   blood: false,          // blood on enemies replaces their health bars
+  bloodPool: false,      // optional floor pools; off by default
+  ragdollStrength: 1,    // 0 keeps the simple fall; higher values add more loose motion
   sens: 1.0,          // multiplier on BASE_SENS (menu slider)
   adsSens: 1.8,       // extra multiplier while scoped, on top of FOV matching
   fov: DEFAULT_FOV,
@@ -985,7 +994,7 @@ function saveSettings() {
       screenBobIntensity: settings.screenBobIntensity, fpsLimit: settings.fpsLimit,
       renderScale: settings.renderScale, antialias: settings.antialias, shadows: settings.shadows,
       scopePreviewSize: settings.scopePreviewSize, sideUtility: savedSelection.sideUtility,
-      time: settings.time, crosshair: settings.crosshair, zoomVer: 4, gunSway: settings.gunSway, zoomIron: settings.zoomIron, zoomDot: settings.zoomDot, adsSensGun: settings.adsSensGun, adsSpeed: settings.adsSpeed, sights: settings.sights, binds, hotbar: savedHotbarState
+      time: settings.time, crosshair: settings.crosshair, zoomVer: 5, gunSway: settings.gunSway, zoomIron: settings.zoomIron, zoomDot: settings.zoomIron, adsSensGun: settings.adsSensGun, adsSpeed: settings.adsSpeed, bloodPool: settings.bloodPool, ragdollStrength: settings.ragdollStrength, sights: settings.sights, binds, hotbar: savedHotbarState
     }));
   } catch (e) {}
 }
@@ -1011,20 +1020,31 @@ function loadSettings() {
     if (typeof d.antialias === "boolean") settings.antialias = d.antialias;
     if (typeof d.shadows === "boolean") settings.shadows = d.shadows;
     if (typeof d.blood === "boolean") settings.blood = d.blood;
+    if (typeof d.bloodPool === "boolean") settings.bloodPool = d.bloodPool;
+    if (typeof d.ragdollStrength === "number") settings.ragdollStrength = clamp(d.ragdollStrength, 0, 2);
     if ([256, 512].includes(d.scopePreviewSize)) settings.scopePreviewSize = d.scopePreviewSize;
     if (["frag", "flash", "smoke"].includes(d.sideUtility)) settings.sideUtility = d.sideUtility;
     if (d.time === "day" || d.time === "night") settings.time = d.time;
     if (d.crosshair && typeof d.crosshair === "object") {
       const c = d.crosshair, t = settings.crosshair;
       const num = (k, a, b) => { if (typeof c[k] === "number") t[k] = clamp(c[k], a, b); };
-      num("size", 4, 40); num("thickness", 1, 8); num("gap", 0, 20); num("dotSize", 2, 12); num("opacity", 0.2, 1);
+      num("size", 4, 40); num("thickness", 1, 8); num("gap", 0, 32); num("lineLength", 2, 24);
+      num("dotSize", 2, 12); num("opacity", 0.2, 1); num("shootXDuration", 50, 500);
+      num("xLength", 4, 32); num("xThickness", 0.5, 6); num("xAngle", 10, 80);
       if (/^#[0-9a-fA-F]{6}$/.test(c.color)) t.color = c.color;
       if (["cross", "dot", "circle", "tshape", "x"].includes(c.style)) t.style = c.style;
-      for (const k of ["dot", "outline", "dynamic"]) if (typeof c[k] === "boolean") t[k] = c[k];
+      for (const k of ["dot", "outline", "dynamic", "showXWhileShooting"]) if (typeof c[k] === "boolean") t[k] = c[k];
+      const wasOldDefault = c.style === "cross" && c.size === 22 && c.thickness === 2 && c.gap === 7 &&
+        c.dotSize === 4 && c.opacity === 1 && (
+          (c.color?.toLowerCase() === "#4dff88" && c.dot === false && c.outline === true && c.dynamic === false) ||
+          (c.color?.toLowerCase() === "#ffffff" && c.dot === true && c.outline === false && c.dynamic === true)
+        );
+      if (wasOldDefault) Object.assign(t, DEFAULT_CROSSHAIR);
     }
     if (typeof d.gunSway === "number") settings.gunSway = clamp(d.gunSway, 0, 2);
-    if (d.zoomVer >= 4 && typeof d.zoomIron === "number") settings.zoomIron = clamp(d.zoomIron, 1, 4);
-    if (d.zoomVer >= 4 && typeof d.zoomDot === "number") settings.zoomDot = clamp(d.zoomDot, 1, 4);
+    // Iron and red-dot sights share one zoom setting. Older saves migrate to the requested 1.25x default.
+    settings.zoomIron = d.zoomVer >= 5 && typeof d.zoomIron === "number" ? clamp(d.zoomIron, 1, 4) : 1.25;
+    settings.zoomDot = settings.zoomIron;
     if (typeof d.adsSensGun === "number") settings.adsSensGun = clamp(d.adsSensGun, 0.2, 1.5);
     if (d.zoomVer >= 3 && typeof d.adsSpeed === "number") settings.adsSpeed = clamp(d.adsSpeed, 0.3, 1);
     if (d.sights && typeof d.sights === "object") for (const id of [2, 3, 4, 5]) if (d.sights[id] === "iron" || d.sights[id] === "dot") settings.sights[id] = d.sights[id];
@@ -1085,6 +1105,7 @@ let scopePreviewTarget = null, scopePreviewCamera = null;
 const GUN_CLOSE = 0.8;   // hip pose: gun is 20% smaller but 20% nearer the camera, so it fills the same part of the screen
 const ADS_SCALE = 2.1, ADS_DROP = 0, HIP_SCALE = 1.15, HIP_Z = 0.19;   // guns are drawn bigger when aimed and sit a little lower on screen
 let recoil = 0, hipBloom = 0, gKnifeCalm = 1;
+let crosshairShootUntil = 0;
 let gunFlip = 0, gunFlipVis = 0;   // rapid muzzle-up flip on every shot
 const swayIn = { x: 0, y: 0 };
 let gSwayX = 0, gSwayY = 0;
@@ -1660,7 +1681,7 @@ function updateScopeTransition(dt) {
   const from = Math.tan(settings.fov * Math.PI / 360);
   let to = Math.tan(scopeViewFov() * Math.PI / 360), zb = scopeViewBlend;
   zb = scopeBlend;   // the whole view zooms with the aim, including the area outside the scope lens
-  if (curWeaponNum !== 1) to = from / (sightChoice(curWeaponNum) === "dot" ? settings.zoomDot : settings.zoomIron);   // iron sights zoom a little, red dots more
+  if (curWeaponNum !== 1) to = from / settings.zoomIron;   // iron and red-dot sights use the same zoom
   camera.fov = 2 * Math.atan(from + (to - from) * zb) * 180 / Math.PI;
   camera.updateProjectionMatrix();
 
@@ -1945,7 +1966,9 @@ function buildMenu() {
           <div id="sliders"></div>
           <div class="secTitle">Camera</div>
           <label class="toggleRow"><input type="checkbox" id="viewBobToggle"> View bobbing <small>Camera and gun move as you walk and sprint</small></label>
-          <label class="toggleRow"><input type="checkbox" id="bloodToggle"> Blood <small>Replaces enemy health bars: the more blood on an enemy, the more hurt they are</small></label>
+          <label class="toggleRow"><input type="checkbox" id="bloodToggle"> Blood on soldiers <small>Replaces enemy health bars with visible wounds</small></label>
+          <label class="toggleRow"><input type="checkbox" id="bloodPoolToggle"> Blood pools <small>Optional floor pools after eliminations; off by default</small></label>
+          <div class="row"><label for="ragdollStrength">Ragdoll strength</label><input type="range" id="ragdollStrength" min="0" max="2" step="0.05"><div class="val" id="ragdollStrengthVal"></div></div>
           <div id="viewBobControls" class="viewBobControls">
             <div class="row"><label for="viewBobIntensity">Overall intensity</label><input type="range" id="viewBobIntensity" min="0" max="2" step="0.05"><div class="val" id="viewBobIntensityVal"></div></div>
             <div class="row"><label for="gunBobIntensity">Gun movement</label><input type="range" id="gunBobIntensity" min="0" max="2" step="0.05"><div class="val" id="gunBobIntensityVal"></div></div>
@@ -2046,6 +2069,23 @@ function buildMenu() {
   bloodToggle.onchange = () => {
     settings.blood = bloodToggle.checked;
     for (const e of enemies) if (e.userData && e.userData.barCanvas) drawHealthBar(e);
+    saveSettings();
+  };
+
+  const bloodPoolToggle = document.getElementById("bloodPoolToggle");
+  bloodPoolToggle.checked = settings.bloodPool;
+  bloodPoolToggle.onchange = () => {
+    settings.bloodPool = bloodPoolToggle.checked;
+    if (!settings.bloodPool) for (const e of dyingEnemies) removeBloodPool(e.userData);
+    saveSettings();
+  };
+  const ragdollStrengthInput = document.getElementById("ragdollStrength");
+  const ragdollStrengthVal = document.getElementById("ragdollStrengthVal");
+  ragdollStrengthInput.value = String(settings.ragdollStrength);
+  ragdollStrengthVal.textContent = Math.round(settings.ragdollStrength * 100) + "%";
+  ragdollStrengthInput.oninput = () => {
+    settings.ragdollStrength = Number(ragdollStrengthInput.value);
+    ragdollStrengthVal.textContent = Math.round(settings.ragdollStrength * 100) + "%";
     saveSettings();
   };
 
@@ -2834,24 +2874,28 @@ function updateHelpText() {
   const weaponKeys=window.__fpsVersusActive?`${k("slot1")}/${k("slot2")}`:`${k("slot1")}/${k("slot2")}/${k("slot3")}`;
   el.textContent =
     `Controls: ${k("forward")}${k("left")}${k("back")}${k("right")} move \u00B7 ${k("sprint")} sprint \u00B7 ${k("jump")} jump · ${k("crouch")} crouch \u00B7 ${k("slide")} slide \u00B7 ` +
-    `LMB shoot \u00B7 RMB scope (AWP) \u00B7 ${k("reload")} reload \u00B7 ${k("grenade")} ready utility, then click to throw (still: right hand, moving: left) \u00B7 ${weaponKeys} weapons \u00B7 Wheel cycles · W/S climb/descend ladders · Esc menu · ${k("help")} hide this`;
+    `LMB shoot \u00B7 RMB scope (AWP) \u00B7 ${k("reload")} reload \u00B7 Hold ${k("grenade")} + click to throw utility (still: right hand, moving: left) \u00B7 ${weaponKeys} weapons \u00B7 Wheel cycles · W/S climb/descend ladders · Esc menu · ${k("help")} hide this`;
 }
 
 function crosshairHTML(s) {
   const c = s.color, o = s.outline ? "box-shadow:0 0 0 1px #000;" : "", op = `opacity:${s.opacity};`;
-  const el = (x, y, w, h, rot, round) => `<div style="position:absolute;left:50%;top:50%;width:${w}px;height:${h}px;transform:translate(-50%,-50%) translate(${x}px,${y}px) rotate(${rot || 0}deg);background:${c};${o}${op}${round ? "border-radius:50%;" : ""}"></div>`;
-  const len = Math.max(1, s.size - s.gap), off = s.gap + len / 2, t = s.thickness; let h = "";
+  const el = (x, y, w, h, rot, round, cls = "ch-shape") => `<div class="${cls}" style="position:absolute;left:50%;top:50%;width:${w}px;height:${h}px;transform:translate(-50%,-50%) translate(${x}px,${y}px) rotate(${rot || 0}deg);background:${c};${o}${op}${round ? "border-radius:50%;" : ""}"></div>`;
+  const len = Math.max(1, s.lineLength ?? (s.size - s.gap)), off = s.gap + len / 2, t = s.thickness; let h = "";
   if (s.style === "cross" || s.style === "tshape") {
-    if (s.style === "cross") h += el(0, -off, t, len);
-    h += el(0, off, t, len) + el(-off, 0, len, t) + el(off, 0, len, t);
+    if (s.style === "cross") h += el(0, -off, t, len, 0, false, "ch-arm");
+    h += el(0, off, t, len, 0, false, s.style === "cross" ? "ch-arm" : "ch-shape") +
+      el(-off, 0, len, t, 0, false, s.style === "cross" ? "ch-arm" : "ch-shape") +
+      el(off, 0, len, t, 0, false, s.style === "cross" ? "ch-arm" : "ch-shape");
   } else if (s.style === "x") {
     const d = off / Math.SQRT2;
     for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) h += el(sx * d, sy * d, t, len, -45 * sx * sy);
   } else if (s.style === "circle") {
     const D = Math.max(8, Math.round(s.size * 1.2));
-    h += `<div style="position:absolute;left:50%;top:50%;width:${D}px;height:${D}px;transform:translate(-50%,-50%);border:${t}px solid ${c};border-radius:50%;box-sizing:border-box;${o}${op}"></div>`;
+    h += `<div class="ch-shape" style="position:absolute;left:50%;top:50%;width:${D}px;height:${D}px;transform:translate(-50%,-50%);border:${t}px solid ${c};border-radius:50%;box-sizing:border-box;${o}${op}"></div>`;
   }
-  if (s.style === "dot" || s.dot) h += el(0, 0, s.dotSize, s.dotSize, 0, true);
+  h += el(0, 0, s.xLength, s.xThickness, s.xAngle, false, "ch-fire-x");
+  h += el(0, 0, s.xLength, s.xThickness, -s.xAngle, false, "ch-fire-x");
+  if (s.style === "dot" || s.dot) h += el(0, 0, s.dotSize, s.dotSize, 0, true, "ch-dot");
   return h;
 }
 function applyCrosshairStyle() {
@@ -2872,14 +2916,17 @@ function renderAccessibility() {
     <div class="chLayout"><div>
       <div class="sightRow">${styles.map(([v, n]) => `<button type="button" class="btn small${s.style === v ? " sel" : ""}" data-chstyle="${v}">${n}</button>`).join("")}</div>
       <div class="sightRow">${cols.map(c => `<button type="button" class="swatch${s.color.toLowerCase() === c ? " sel" : ""}" style="background:${c}" data-chcolor="${c}" aria-label="Colour ${c}"></button>`).join("")}<input type="color" id="chColorPick" value="${s.color}" aria-label="Custom colour"></div>
-      ${sl("size", "Size", 4, 40, 1, v => v)}${sl("thickness", "Thickness", 1, 8, 1, v => v)}${sl("gap", "Centre gap", 0, 20, 1, v => v)}${sl("dotSize", "Dot size", 2, 12, 1, v => v)}${sl("opacity", "Opacity", 0.2, 1, 0.05, v => Math.round(v * 100) + "%")}
+      ${sl("size", "Size (circle / other styles)", 4, 40, 1, v => v)}${sl("lineLength", "Cross arm length", 2, 24, 1, v => v + " px")}${sl("thickness", "Cross arm thickness", 1, 8, 1, v => v + " px")}${sl("gap", "Cross arm gap from dot", 0, 32, 1, v => v + " px")}
+      ${sl("xLength", "Firing X length", 4, 32, 1, v => v + " px")}${sl("xThickness", "Firing X thickness", 0.5, 6, 0.5, v => v + " px")}${sl("xAngle", "Firing X angle from horizontal", 10, 80, 1, v => v + "°")}${sl("shootXDuration", "Firing X linger", 50, 500, 10, v => Math.round(v) + " ms")}
+      ${sl("dotSize", "Dot size", 2, 12, 1, v => v + " px")}${sl("opacity", "Opacity", 0.2, 1, 0.05, v => Math.round(v * 100) + "%")}
       <label class="toggleRow"><input type="checkbox" data-chbool="dot"${s.dot ? " checked" : ""}> Centre dot <small>Add a dot to cross, T, X or circle</small></label>
+      <label class="toggleRow"><input type="checkbox" data-chbool="showXWhileShooting"${s.showXWhileShooting ? " checked" : ""}> Show only X while firing <small>Hide the four cross arms until the firing cue ends</small></label>
       <label class="toggleRow"><input type="checkbox" data-chbool="outline"${s.outline ? " checked" : ""}> Black outline</label>
       <label class="toggleRow"><input type="checkbox" data-chbool="dynamic"${s.dynamic ? " checked" : ""}> Dynamic spread <small>Widens when you move or fire from the hip</small></label>
     </div><div id="chPreview" aria-label="Crosshair preview"></div></div>
     <div class="secTitle">Weapon</div>
     <div class="row"><label>Gun sway when turning</label><input type="range" id="gunSwayRange" min="0" max="2" step="0.05" value="${settings.gunSway}"><div class="val" id="gunSwayVal">${Math.round(settings.gunSway * 100)}%</div></div>
-    ${wr("zoomIron", "Iron sight zoom", 1, 4, 0.05, v => v.toFixed(2) + "x")}${wr("zoomDot", "Red dot zoom", 1, 4, 0.05, v => v.toFixed(2) + "x")}${wr("adsSensGun", "Aim sensitivity", 0.2, 1.5, 0.05, v => Math.round(v * 100) + "%")}
+    ${wr("zoomIron", "Iron / red dot sight zoom", 1, 4, 0.05, v => v.toFixed(2) + "x")}${wr("adsSensGun", "Aim sensitivity", 0.2, 1.5, 0.05, v => Math.round(v * 100) + "%")}
     <button class="btn small" id="chReset" type="button">Reset crosshair</button>`;
   applyCrosshairStyle();
   const save = () => { saveSettings(); applyCrosshairStyle(); };
@@ -2889,7 +2936,7 @@ function renderAccessibility() {
   host.querySelectorAll("[data-ch]").forEach(i => i.oninput = () => { const k = i.dataset.ch; s[k] = Number(i.value); i.nextElementSibling.textContent = k === "opacity" ? Math.round(s.opacity * 100) + "%" : s[k]; save(); });
   host.querySelectorAll("[data-chbool]").forEach(i => i.onchange = () => { s[i.dataset.chbool] = i.checked; save(); });
   host.querySelector("#gunSwayRange").oninput = e => { settings.gunSway = Number(e.target.value); host.querySelector("#gunSwayVal").textContent = Math.round(settings.gunSway * 100) + "%"; saveSettings(); };
-  host.querySelectorAll("[data-ws]").forEach(i => i.oninput = () => { const k = i.dataset.ws; settings[k] = Number(i.value); i.nextElementSibling.textContent = wrFmt[k](settings[k]); saveSettings(); });
+  host.querySelectorAll("[data-ws]").forEach(i => i.oninput = () => { const k = i.dataset.ws; settings[k] = Number(i.value); if (k === "zoomIron") settings.zoomDot = settings.zoomIron; i.nextElementSibling.textContent = wrFmt[k](settings[k]); saveSettings(); });
   host.querySelector("#chReset").onclick = () => { Object.assign(settings.crosshair, DEFAULT_CROSSHAIR); save(); renderAccessibility(); };
 }
 function sightChoice(n) { return settings.sights[n] || "iron"; }
@@ -9897,6 +9944,7 @@ function shoot() {
 
   st.mag--; shots++;
   hipBloom = Math.min(1.2, hipBloom + 0.18);
+  crosshairShootUntil = now + (settings.crosshair.shootXDuration || 150);
   GunSFX.fire(w.type === "pistol" ? "rifle" : w.type);   // the Glock cracks like the M4A1
 
   // recoil impulses
@@ -10557,7 +10605,7 @@ function kbFree(x, z, feet) {
   return true;
 }
 function startEnemyDeath(enemy, fromPos) {
-  const ud = enemy.userData; if (!ud || ud.dying) { scene.remove(enemy); return; }
+  const ud = enemy.userData; if (!ud || ud.dying) return;
   ud.dying = true; ud.deadT = 0;
   enemy.traverse(o => { if (o.isSprite) o.visible = false; o.raycast = () => {}; });
   if (ud.rig) { if (ud.rig.flash) ud.rig.flash.visible = false; if (ud.rig.laser) ud.rig.laser.visible = false; }
@@ -10573,7 +10621,20 @@ function startEnemyDeath(enemy, fromPos) {
     ud.gunV = sd.multiplyScalar(1.5 + Math.random() * 0.7).addScaledVector(away, 0.4); ud.gunV.y = 1.1 + Math.random() * 0.5;
     ud.gunSpin = new THREE.Vector3((Math.random() - 0.5) * 7, (Math.random() - 0.5) * 5, (Math.random() - 0.5) * 9);
   }
-  if (settings.blood && ud.rig) makeBloodPool(enemy);
+  ud.ragdollStrength = clamp(settings.ragdollStrength, 0, 2);
+  ud.ragImpulse = ud.rig ? {
+    arms: ud.rig.arms.map(() => ({
+      x: (Math.random() - 0.5) * 1.8, z: (Math.random() - 0.5) * 2.2,
+      elbow: (Math.random() - 0.5) * 2.4, phase: Math.random() * Math.PI * 2, rate: 9 + Math.random() * 9,
+    })),
+    legs: ud.rig.legs.map(() => ({
+      x: (Math.random() - 0.5) * 1.5, z: (Math.random() - 0.5) * 1.4,
+      knee: (Math.random() - 0.5) * 2, phase: Math.random() * Math.PI * 2, rate: 8 + Math.random() * 8,
+    })),
+    head: { x: (Math.random() - 0.5) * 0.65, z: (Math.random() - 0.5) * 0.7, phase: Math.random() * Math.PI * 2 },
+    torso: { x: (Math.random() - 0.5) * 0.22, z: (Math.random() - 0.5) * 0.28, phase: Math.random() * Math.PI * 2 },
+  } : null;
+  if (settings.bloodPool && ud.rig) makeBloodPool(enemy);
   dyingEnemies.push(enemy);
 }
 function updateDyingEnemies(dt, onlyEnemy = null) {
@@ -10599,7 +10660,7 @@ function updateDyingEnemies(dt, onlyEnemy = null) {
       const nx = e.position.x + ud.fallDir.x * step, nz = e.position.z + ud.fallDir.z * step;
       if (kbFree(nx, nz, ud.baseY)) { e.position.x = nx; e.position.z = nz; } else ud.kbP = 1;
     }
-    const k = Math.min(1, ud.deadT / 0.4), e1 = k * k * (3 - 2 * k);
+    const k = Math.min(1, ud.deadT / 0.58), e1 = k * k * (3 - 2 * k);
     const yaw = e.rotation.y, lx = Math.cos(yaw) * ud.fallDir.x - Math.sin(yaw) * ud.fallDir.z, lz = Math.sin(yaw) * ud.fallDir.x + Math.cos(yaw) * ud.fallDir.z;   // fall direction in local space
     const r = ud.rig;
     if (r) {
@@ -10608,7 +10669,7 @@ function updateDyingEnemies(dt, onlyEnemy = null) {
       // the pose at fall progress ev: topples 90 degrees, legs straight and apart, arms down along the sides, torso released from its lean
       const pose = (ev, kv) => {
         r.model.quaternion.setFromAxisAngle(_cAx, (Math.PI / 2 + 0.03) * ev);
-        r.model.quaternion.multiply(_cQ.setFromAxisAngle(_cUp, ud.fallSide * ev * 0.6));
+        r.model.quaternion.multiply(_cQ.setFromAxisAngle(_cUp, (ud.fallSide * 0.6 + ud.fallSpin * 0.45) * ev));
         r.legs.forEach((l, j) => { l.hip.rotation.set((j ? 0.12 : -0.06) * ev + Math.sin(kv * 5 + j) * 0.2 * (1 - ev), 0, (j ? 1 : -1) * 0.16 * ev); l.knee.rotation.x = (j ? 0.12 : 0.04) * ev; });   // y is reset each time: the limb corrections must not leak into the next pose
         r.arms.forEach(a => { a.sh.rotation.set(a.ux + (0.12 - a.ux) * ev, 0, a.uz + (a.sgn * 0.42 - a.uz) * ev); a.el.rotation.x = a.fx + (0.22 - a.fx) * ev; });
         const f = 1 - ev; r.upper.rotation.set(ud.u0.x * f, ud.u0.y * f, ud.u0.z * f); r.upper.position.copy(ud.u0.p).multiplyScalar(f);
@@ -10668,7 +10729,22 @@ function updateDyingEnemies(dt, onlyEnemy = null) {
       }
       pose(e1, k);
       for (const f of ud.limbFix) { f.g.quaternion.premultiply(_cQ.identity().slerp(f.dq, e1)); if (f.g === r.headG) f.g.position.copy(_headPivot).sub(_headOff.copy(_headPivot).applyQuaternion(f.g.quaternion)); }   // every limb eases into its resting tilt together with the fall
-      r.model.position.y = -0.34 * Math.sin(Math.min(1, k * 2) * Math.PI * 0.5) * (1 - e1) + ud.liftT * e1;   // despawn is instant: no sinking
+      const rag = ud.ragImpulse, ragDamp = Math.exp(-ud.deadT * 2.4) * (ud.ragdollStrength || 0);
+      if (rag && ragDamp > 0.001) {
+        r.arms.forEach((a, i) => {
+          const q = rag.arms[i], swing = Math.sin(ud.deadT * q.rate + q.phase) * ragDamp;
+          a.sh.rotation.x += q.x * swing; a.sh.rotation.z += q.z * swing; a.el.rotation.x += q.elbow * swing;
+        });
+        r.legs.forEach((l, i) => {
+          const q = rag.legs[i], swing = Math.sin(ud.deadT * q.rate + q.phase) * ragDamp;
+          l.hip.rotation.x += q.x * swing; l.hip.rotation.z += q.z * swing; l.knee.rotation.x += q.knee * swing;
+        });
+        const hs = Math.sin(ud.deadT * 13 + rag.head.phase) * ragDamp;
+        r.headG.rotation.x += rag.head.x * hs; r.headG.rotation.z += rag.head.z * hs;
+        const ts = Math.sin(ud.deadT * 11 + rag.torso.phase) * ragDamp;
+        r.upper.rotation.x += rag.torso.x * ts; r.upper.rotation.z += rag.torso.z * ts;
+      }
+      r.model.position.y = -0.34 * Math.sin(Math.min(1, k * 1.7) * Math.PI * 0.5) * (1 - e1) + ud.liftT * e1;   // despawn is instant: no sinking
       if (e1 < 0.999) {   // while falling, no part may dip under the floor
         e.updateMatrixWorld(true); let mn = Infinity;
         e.traverse(o => { if (!o.isMesh || !o.material || o.material.visible === false || !o.visible) return; bb.setFromObject(o); if (bb.min.y < mn) mn = bb.min.y; });
@@ -11957,10 +12033,10 @@ function setGrenadeEquipped(on) {
     reloading = false;
   }
   updateWeaponModelVisibility();
-  updateHUD(on ? (grenades > 0 ? UTILITY_TYPES[utilityType].name + " ready — click to throw; still: right hand · moving: left hand" : "No " + UTILITY_TYPES[utilityType].shortName.toLowerCase() + " charges") : "Ready");
+  updateHUD(on ? (grenades > 0 ? "Hold " + prettyKey(binds.grenade) + " + click to throw " + UTILITY_TYPES[utilityType].name.toLowerCase() : "No " + UTILITY_TYPES[utilityType].shortName.toLowerCase() + " charges") : "Ready");
 }
 
-function toggleGrenadeReady() {   // grenade key readies the utility; LMB = overhand, RMB = underhand; the model appears on click
+function toggleGrenadeReady() {   // holding the grenade key readies the utility; click while held to throw
   if (!roundActive || dying || throwState || swapping) return;
   if (grenadeEquipped) { setGrenadeEquipped(false); return; }
   const nm = UTILITY_TYPES[utilityType].shortName.toLowerCase();
@@ -12110,7 +12186,7 @@ function applyWeaponFeel(dt, isMoving, isSprinting) {
   const scopePose = (!grenadeEquipped && w.type !== "melee") ? gunAimBlend : 0;
   const scopeZ = (!grenadeEquipped && w.type !== "melee") ? scopeBlend : 0;   // size / zoom keep the original timing
   let ax = -0.14 * 1.4, ay = 0, az = 0.33;     // AWP: scope axis. Other guns: their chosen sight sits dead centre, ~30 cm from the eye
-  const zoomFin = curWeaponNum === 1 ? Math.tan(settings.fov * Math.PI / 360) / Math.tan(scopeViewFov() * Math.PI / 360) : (sightChoice(curWeaponNum) === "dot" ? settings.zoomDot : settings.zoomIron);
+  const zoomFin = curWeaponNum === 1 ? Math.tan(settings.fov * Math.PI / 360) / Math.tan(scopeViewFov() * Math.PI / 360) : settings.zoomIron;
   const kAds = curWeaponNum === 1 ? 1.75 / zoomFin : (weapons[curWeaponNum].type === "pistol" ? 1.5 : ADS_SCALE) / zoomFin;   // the zoom magnifies the gun too, so shrink it back: it always looks ADS_SCALE big
   if (curWeaponNum === 1) { ax = -0.14 * 1.15 * kAds; az = -0.14 + kAds * 0.336 * 1.15; }   // the zoom magnifies the rifle too, so it is shrunk back; the eyepiece stays the same distance from the eye
   if (curWeaponNum !== 1) { const d = adsFor(curWeaponNum); ax = -d[0] * kAds; ay = -d[1] * kAds - ADS_DROP; az = -(weapons[curWeaponNum].type === "pistol" ? 1.12 : 0.80) - d[2] * kAds; }
@@ -12252,11 +12328,11 @@ function addEventListeners() {
   document.addEventListener("mousedown", (e) => {
     if (!locked) return;
     if (e.button === 0) {
-      if (grenadeEquipped) { mouseDown = false; tryThrowGrenade("over"); }
+      if (grenadeEquipped) { mouseDown = false; if (keys[normCode(binds.grenade)]) tryThrowGrenade("over"); }
       else { mouseDown = true; shoot(); }
     }
     if (e.button === 2) {
-      if (grenadeEquipped) { tryThrowGrenade("under"); return; }
+      if (grenadeEquipped) { if (keys[normCode(binds.grenade)]) tryThrowGrenade("under"); return; }
       if (weapons[curWeaponNum].type === "melee") startKnifeAttack(true);
       else if (!sprintActive() && !reloading) setScoped(true);
     }
@@ -12290,7 +12366,7 @@ function addEventListeners() {
     if (code === binds.slide && !e.repeat) slideState.want = true;
     if (code === binds.jump) { if (slideState.t > 0) slideState.cd = 1.5; slideState.t = 0; }
     if (code === binds.reload) startReload();
-    if (code === binds.grenade && !e.repeat) toggleGrenadeReady();
+    if (code === normCode(binds.grenade) && !e.repeat) toggleGrenadeReady();
     if (code === binds.help && !e.repeat) {
       const helpEl = document.getElementById("miniHelp");
       if (helpEl) helpEl.classList.toggle("show");
@@ -12301,6 +12377,7 @@ function addEventListeners() {
     const code = normCode(e.code);
     keys[code] = false;
     if (code === binds.jump) jumpQueued = false;
+    if (code === normCode(binds.grenade) && grenadeEquipped && !throwState) setGrenadeEquipped(false);
   });
 
   window.addEventListener("resize", () => {
@@ -12741,7 +12818,11 @@ function animate(timestamp) {
     gSwayX += (tx - gSwayX) * kk; gSwayY += (ty - gSwayY) * kk;
     const chEl = animate._ch || (animate._ch = document.getElementById("crosshair"));
     const dyn = settings.crosshair.dynamic ? 1 + hipBloom * 0.5 * (1 - scopeBlend) + (isMoving ? 0.2 : 0) : 1;
-    if (chEl) chEl.style.setProperty("--ch-scale", dyn.toFixed(3));
+    if (chEl) {
+      chEl.style.setProperty("--ch-scale", dyn.toFixed(3));
+      chEl.classList.toggle("show-fire-x", !!settings.crosshair.showXWhileShooting);
+      chEl.classList.toggle("shooting", !!settings.crosshair.showXWhileShooting && crosshairShootUntil > gNow());
+    }
   }
 
   // weapon animations (bolt/pump) + NEW feel (bob/sway/swap)
@@ -13108,13 +13189,13 @@ initDeathScreen();
         avatar.targetYaw = playerYaw;
         avatar.group.userData.remotePitch = playerPitch;
         avatar.group.userData.remotePlayerId = playerId;
-        const wasAlive = avatar.group.userData.alive !== false;
+        const wasAlive = avatar.group.userData.alive !== false && !avatar.group.userData.dying;
         const previousHp = avatar.group.userData.hp;
         avatar.group.userData.maxHp = Number.isFinite(mpState?.config?.health) ? mpState.config.health : (Number.isFinite(PLAYER_MAX_HP) ? PLAYER_MAX_HP : 100);
         avatar.group.userData.hp = Number.isFinite(player.hp) ? player.hp : 100;
         if (settings.blood && avatar.group.userData.hp < previousHp) drawHealthBar(avatar.group);
         avatar.group.userData.team = player.team || null;
-        avatar.group.userData.alive = player.alive !== false;
+        avatar.group.userData.alive = player.alive !== false && !avatar.group.userData.dying;
         if (avatar.label && player.profile) {
           const key = (player.profile.username || "Player") + "|" + (player.team || "");
           if (avatar.tagText !== key) { avatar.tagText = key; drawNameTag(avatar, player.profile.username || "Player", player.team || null); }
@@ -13147,11 +13228,7 @@ initDeathScreen();
             const tagWorld=new THREE.Vector3(g.position.x,g.position.y+(tag.position.y||2.55),g.position.z);
             tag.visible=!lineBlockedBySmoke(camera.position,tagWorld);
           }
-          if (g.userData.dying) {
-            // Corpse motion is cosmetic and must keep running during active, pointer-locked play.
-            updateDyingEnemies(dt, g);
-            continue;
-          }
+          if (g.userData.dying) continue; // global render loop advances the ragdoll once per frame
           const k = 1 - Math.exp(-dt * 16);
           const px = g.position.x, pz = g.position.z;
           g.position.x += (avatar.target.x - g.position.x) * k;
@@ -13330,22 +13407,24 @@ initDeathScreen();
 /* ===== menu shell (mode / setup / ready / loadout / pause) ===== */
 #mpModal{background:transparent}
 #mpModal::before{content:"";position:absolute;inset:0;background:var(--bg,#03080d);opacity:1;transition:opacity .9s ease;pointer-events:none}
-#mpModal.splash{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#0c3342 0%,#07202b 45%,#03080d 100%);backdrop-filter:blur(4px) brightness(.62);-webkit-backdrop-filter:blur(4px) brightness(.62)}
-/* Hold on black before revealing the large round/match result title. */
-#mpModal.splash-intro{--bg:#000;background:#000}
-#mpModal.splash-intro::before{background:#000;opacity:1;transition:none}
+#mpModal.splash,#mpModal.splash-intro{backdrop-filter:blur(4px) brightness(.78);-webkit-backdrop-filter:blur(4px) brightness(.78)}
+#mpModal.splash{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#0c3342 0%,#07202b 45%,#03080d 100%)}
+/* Show the round-result color wash over the live game before revealing the title. */
+#mpModal.splash-intro{background:transparent}
+#mpModal.splash-intro::before{background:var(--bg,#03080d);opacity:.58;transition:none}
 #mpModal.splash-intro .spl{animation:none}
 #mpModal.splash-intro .spl::before,#mpModal.splash-intro .spl::after{display:none}
 #mpModal.splash-intro .splT{opacity:0;animation:none}
-#mpModal.splash::before{opacity:.76}
+#mpModal.splash::before{opacity:.58}
 #mpModal.win{--bg:radial-gradient(ellipse 70% 60% at 0% 0%,#10566e,transparent 60%),linear-gradient(180deg,#04090e,#02050a)}
 #mpModal.loss{--bg:radial-gradient(ellipse 70% 60% at 0% 0%,#78241a,transparent 60%),linear-gradient(180deg,#0a0504,#040202)}
 #mpModal.draw{--bg:radial-gradient(ellipse 70% 60% at 0% 0%,#6e5a14,transparent 60%),linear-gradient(180deg,#090804,#030302)}
-#mpModal.splash.win{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#0c3342 0%,#07202b 45%,#03080d 100%)}
-#mpModal.splash.draw{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#4a3c12 0%,#241d0a 45%,#070603 100%)}
-#mpModal.splash.loss{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#4a1a12 0%,#2a0f0b 45%,#070302 100%)}
+#mpModal.splash.win,#mpModal.splash-intro.win{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#0c3342 0%,#07202b 45%,#03080d 100%)}
+#mpModal.splash.draw,#mpModal.splash-intro.draw{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#4a3c12 0%,#241d0a 45%,#070603 100%)}
+#mpModal.splash.loss,#mpModal.splash-intro.loss{--bg:radial-gradient(ellipse 80% 70% at 50% 50%,#4a1a12 0%,#2a0f0b 45%,#070302 100%)}
 #mpModal.win::before,#mpModal.loss::before,#mpModal.draw::before{opacity:.9}
-#mpModal.splash.win::before,#mpModal.splash.loss::before,#mpModal.splash.draw::before{opacity:.76}
+#mpModal.splash.win::before,#mpModal.splash.loss::before,#mpModal.splash.draw::before{opacity:.58}
+#mpModal.splash-intro.win::before,#mpModal.splash-intro.loss::before,#mpModal.splash-intro.draw::before{opacity:.58}
 #mpModal.screen{--bg:linear-gradient(135deg,#0d1118 0%,#080a10 55%,#05070b 100%)}
 #mpModal.screen::after{content:"";position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(135deg,rgba(255,176,46,.035) 0 2px,transparent 2px 16px)}
 #mpModal.screen.pause{backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
@@ -13741,6 +13820,13 @@ body.mpNav #hud{top:204px}
   }
   function addKill(k){
     if(k.victimId)(window.__fpsKillerOf||(window.__fpsKillerOf=new Map())).set(k.victimId,k.killerId||null);
+    if(window.__fpsVersusActive && k.victimId){
+      const avatar=remoteAvatarById.get(k.victimId);
+      if(avatar && !avatar.group.userData.dying){
+        avatar.group.userData.alive=false;avatar.group.userData.hp=0;avatar.group.userData.keepCorpse=true;
+        startEnemyDeath(avatar.group,killOriginFor(k.victimId));
+      }
+    }
     if(!window.__fpsVersusActive)return;
     showCounts(k);
     const d=document.createElement("div");
@@ -13931,7 +14017,7 @@ body.mpNav #hud{top:204px}
     clearInterval(countdownTimer);hideBanner();hudEl.hidden=true;
     show(`<div class="spl ${r.kind}" id="mpSplash"><div class="splT" data-t="${r.title}">${r.title}</div></div>`,"splash-intro "+r.kind);
     $("mpSplash").addEventListener("click",()=>goScore());
-    const revealDelay=matchMedia("(prefers-reduced-motion: reduce)").matches?80:450;
+    const revealDelay=matchMedia("(prefers-reduced-motion: reduce)").matches?60:150;
     setTimeout(()=>{if(modal.classList.contains("splash-intro")){modal.classList.remove("splash-intro");modal.classList.add("splash");}},revealDelay);
     clearTimeout(stageTimer);stageTimer=setTimeout(goScore,1650);
   }
