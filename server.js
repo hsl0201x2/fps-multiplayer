@@ -23,7 +23,7 @@ const CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 const MAX_PLAYERS = 8;
 const MAX_POSITION = 10000;
 const STALE_MS = 15000;
-const PLAYER_FALL_MS = 700;   // let the local and remote death falls finish before showing the round result
+const PLAYER_FALL_MS = 650;   // show the round result just after local/remote death falls finish
 
 function cleanProfile(raw = {}) {
   const username = String(raw.username || "Player")
