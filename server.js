@@ -23,6 +23,12 @@ const CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 const MAX_PLAYERS = 8;
 const MAX_POSITION = 10000;
 const STALE_MS = 15000;
+const STANCES = new Set(["stand", "crouch", "slide", "air"]);
+// Health regeneration is decided here, once, for everybody. (It used to run on each client with that player's own
+// difficulty setting, so players on a harder difficulty regenerated slower.)
+const HEAL_DELAY_MS = 5200;     // no regeneration for this long after taking damage
+const HEAL_RATE = 13;           // hp per second
+const SPRINT_FLAG_MS = 500;     // a "sprinting" report counts only while it is this fresh
 const PLAYER_FALL_MS = 650;   // show the round result just after local/remote death falls finish
 
 function cleanProfile(raw = {}) {
@@ -58,6 +64,7 @@ function publicPlayers(lobby) {
     team: p.team,
     hp: p.hp,
     alive: p.alive,
+    stance: p.stance || "stand",
     readyAgain: lobby.ready.has(p.id),
     loadoutReady: lobby.loadoutReady.has(p.id),
     loadout: p.loadout || [],
@@ -224,6 +231,9 @@ function startRound(lobby) {
   for (const player of lobby.players.values()) {
     player.hp = lobby.config.health;
     player.alive = true;
+    player.lastDamageAt = 0;
+    player.stance = "stand";
+    player.sprinting = false;
     player.utilityAmmo = 1;
     player.utilityCooldownUntil = 0;
     player.position = null;   // the client places itself on a valid spawn and reports it
@@ -592,6 +602,8 @@ io.on("connection", (socket) => {
       yaw: a.yaw,
       pitch: Math.max(-Math.PI / 2, Math.min(Math.PI / 2, a.pitch)),
     };
+    player.stance = STANCES.has(update.stance) ? update.stance : "stand";
+    player.sprinting = update.sprint === true;
     player.updatedAt = Date.now();
     io.to(lobby.code).emit("players:snapshot", publicPlayers(lobby));
   });
@@ -685,6 +697,7 @@ io.on("connection", (socket) => {
     const amount = Math.min(120, value);
     shooter.damage += Math.min(target.hp, amount);
     target.hp = Math.max(0, target.hp - amount);
+    target.lastDamageAt = Date.now();
     target.alive = target.hp > 0;
     if (!target.alive) {
       shooter.kills += 1;
@@ -709,6 +722,7 @@ io.on("connection", (socket) => {
     const value = Number(damage);
     if (!lobby || lobby.phase !== "playing" || !player?.alive || !Number.isFinite(value) || value <= 0) return;
     player.hp = Math.max(0, player.hp - Math.min(120, value));
+    player.lastDamageAt = Date.now();
     player.alive = player.hp > 0;
     if (!player.alive) player.deaths += 1;
     sendLobby(lobby);
@@ -737,6 +751,27 @@ io.on("connection", (socket) => {
     void leaveLobby(socket);
   });
 });
+
+// Server-side health regeneration: the same rate and delay for every player.
+let lastRegenAt = Date.now();
+setInterval(() => {
+  const now = Date.now();
+  const dt = Math.min(0.25, (now - lastRegenAt) / 1000);
+  lastRegenAt = now;
+  for (const lobby of lobbies.values()) {
+    if (lobby.phase !== "playing") continue;
+    const maxHp = lobby.config?.health || 100;
+    let changed = false;
+    for (const p of lobby.players.values()) {
+      if (!p.alive || p.hp >= maxHp) continue;
+      if (now - (p.lastDamageAt || 0) < HEAL_DELAY_MS) continue;
+      if (p.sprinting && now - p.updatedAt < SPRINT_FLAG_MS) continue;   // no regeneration while sprinting
+      p.hp = Math.min(maxHp, p.hp + HEAL_RATE * dt);
+      changed = true;
+    }
+    if (changed) io.to(lobby.code).emit("players:snapshot", publicPlayers(lobby));
+  }
+}, 100);
 
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, "0.0.0.0", () => {
