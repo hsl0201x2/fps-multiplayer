@@ -72,9 +72,12 @@
   }
   #crosshair .line { position:absolute; background: var(--ch-color, #ffffff); }
   #crosshair .ch-fire-x, #chPreview .ch-fire-x { display:none; }
-  #crosshair.show-fire-x.shooting .ch-arm,
-  #crosshair.show-fire-x.shooting .ch-shape { display:none; }
-  #crosshair.show-fire-x.shooting .ch-fire-x { display:block; }
+  #crosshair.shooting-miss .ch-arm,
+  #crosshair.shooting-miss .ch-shape,
+  #crosshair.shooting-hit .ch-arm,
+  #crosshair.shooting-hit .ch-shape,
+  #crosshair.shooting-hit .ch-dot { display:none !important; }
+  #crosshair.shooting-hit .ch-fire-x { display:block; }
   #crosshair .dot {
     position:absolute;
     width: var(--ch-dot, 0px); height: var(--ch-dot, 0px);
@@ -90,6 +93,7 @@
     top: 50%; left: 50%;
     transform: translate(-50%, -50%);
     width: 34px; height: 34px;
+    display: none;
     z-index: 31;
     pointer-events: none;
     opacity: 0;
@@ -603,7 +607,7 @@
   .mapCard:hover { transform: translateY(-2px); }
   .btn { border-radius:12px; }
 
-  #crosshair { transform: translate(-50%, -50%) scale(var(--ch-scale, 1)); }
+  #crosshair { transform: translate(-50%, -50%) scale(var(--ch-scale, 1)); transition: transform 120ms cubic-bezier(.2,.8,.25,1); transform-origin: center; }
   #rdDot { position:fixed; left:50%; top:50%; width:5px; height:5px; margin:-2.5px 0 0 -2.5px; border-radius:50%; background:#ff2a1a; box-shadow:0 0 6px 2px rgba(255,40,20,.85); z-index:29; pointer-events:none; opacity:0; }
   body.dead #rdDot { opacity:0 !important; }
   #chPreview { position:relative; width:150px; height:150px; flex:0 0 auto; border-radius:12px; border:1px solid rgba(255,255,255,.14); background:linear-gradient(135deg,#3a4a3a,#2a303a); }
@@ -709,6 +713,8 @@ let stairLag = 0, ladderPhase = 0, ladderBlend = 0, ladderMoveK = 0, ladderExit 
 // Crouch + sprint rules
 const CROUCH = { eye: 1.14, speedMul: 0.5, lerp: 14 };   // eye height while crouched, speed multiplier, how fast the view lowers
 const RELOAD_SPEED_MUL = 0.6;                            // movement speed multiplier while reloading
+const MOVE_SPEED_MUL = 0.9;                               // all player-controlled movement is 10% slower
+let sprintCancelledByShot = false;
 const _bobBase = new THREE.Vector3();
 const SLIDE = { dur: 0.9, boost: 7, eye: 1.35 };
 let slidePose = 0, hipFireK = 0;
@@ -723,8 +729,23 @@ function moveInput() {
 // Sprinting = sprint key held while actually moving. Not possible while crouched or reloading.
 // While sprinting you can't shoot, reload, scope or regenerate health.
 function sprintActive() {
-  return !!keys[binds.sprint] && moveInput() && !crouchHeld() && !reloading;
+  return !sprintCancelledByShot && !!keys[binds.sprint] && moveInput() && !crouchHeld() && !reloading;
 }
+// Body stance shared with other players in multiplayer: it drives their animation and the size / position of their hitboxes.
+function localStance() {
+  if (slideState.t > 0 && PLAYER.grounded) return "slide";
+  if (!PLAYER.grounded && !activeLadder) return "air";
+  if (crouchHeld() && !activeLadder) return "crouch";
+  return "stand";
+}
+// Hit spheres per stance: [height above the feet, radius, offset along the facing direction (+ = in front, - = behind)].
+const VERSUS_HIT = {
+  stand:  { head: [1.56, 0.24, 0],     upper: [1.02, 0.46, 0],     legs: [0.40, 0.34, 0] },
+  crouch: { head: [1.15, 0.23, 0.36],  upper: [0.75, 0.42, 0.14],  legs: [0.28, 0.32, 0.20] },
+  slide:  { head: [0.96, 0.23, -0.69], upper: [0.61, 0.42, -0.40], legs: [0.32, 0.34, 0.35] },
+  air:    { head: [1.56, 0.24, 0],     upper: [1.04, 0.44, 0],     legs: [0.62, 0.30, 0.10] },
+};
+function versusSpheres(stance) { return VERSUS_HIT[stance] || VERSUS_HIT.stand; }
 let jumpQueued = false;
 
 const BOUNDS = { x: 44, zMin: -120, zMax: 20 }; // dynamic per map via setBounds()
@@ -809,7 +830,7 @@ const settings = {
   gunBobIntensity: 1,
   screenBobIntensity: 1,
   fpsLimit: 0,        // uncapped; choose a limit in Controls if desired
-  renderScale: 1.25,  // maximum device-pixel ratio: 0.75 / 1.0 / 1.25
+  renderScale: 1,     // default device-pixel ratio: 100%
   antialias: false,   // WebGL context option; changes apply after reload
   shadows: false,     // real-time directional shadows
   scopePreviewSize: 256, // square render-target size: 256 (fast) / 512 (sharper)
@@ -847,6 +868,53 @@ const HIP_PITCH = -0.08;   // muzzle tipped down so the rear of the gun rides hi
 const GUN_POSE = { dist: 4.6, sprintLower: 0.13, sprintRaise: -0.18, sprintSide: 0.50, sprintYaw: 0.42, sprintRoll: 0, hipYaw: -0.07 };   // hipYaw: muzzle angled across towards the centre when carried at the hip
 const GUN_AIM_YAW   = Math.atan2(0.44, GUN_POSE.dist) * 0.3;    // gun sits ~0.49 right of the crosshair
 const GUN_AIM_PITCH = Math.atan2(0.50, GUN_POSE.dist) * 0.6;   // and ~0.545 below it
+
+// ===== Tactical sprint (double-tap the sprint key) =====
+// Muzzle-up carry, magazine side rocking left/right, one hand low and fixed, the other swinging in and out of view.
+// It lasts TAC.hold seconds, then fades back into the normal sprint over TAC.fade seconds: the muzzle is first lowered until it is about
+// 10 degrees above the horizontal, then the gun swings round into the normal sprint carry. Speed eases from TAC.speedMul down to 1 over the same time.
+const TAC = { speedMul: 1.15, hold: 5, fade: 5, tapMs: 320, armMs: 450, cooldownMs: 10000, lowerFrac: 0.6, levelPitch: 10 * Math.PI / 180, exitRate: 3.8, normalExitRate: 9 };
+const GUN_POSE_TAC = { sprintLower: 0.34, sprintLowerOther: 0.28, sprintRaise: 1.3, sprintYaw: -0.06, sprintRoll: -0.166 };
+const tacState = { on: false, t: 0, lastTap: -1e9, armedAt: -1e9, cooldownUntil: 0 };
+let tacStyle = 0;                        // 0 = normal sprint carry ... 1 = tactical carry (smoothed)
+let tacRaise = GUN_POSE.sprintRaise;     // current muzzle pitch of the sprint carry in radians (+ = muzzle up)
+let sprintPh = 0, sprintPhY = 0, sprintPhArm = 0;   // tactical sprint bob phases (side tilt, up/down, off-hand swing)
+const SPRINT_BOB_RATE = 1.25 * 0.75 * 1.5 * 7.0;     // radians per second: side-to-side tilt of the gun
+const SPRINT_BOB_Y_RATE = 1.25 * 1.5 * 1.5 * 7.0;    // radians per second: gun up/down
+const SPRINT_ARM_RATE = SPRINT_BOB_RATE;             // off-hand swing runs at the same rate as the gun's side tilt
+function sprintWave(ph, d = 0.09) { return (Math.sin(ph) + d * Math.sin(3 * ph)) / (1 - d); }   // eased sine: lingers slightly at each end
+const SPRINT_TILT = 0.218;               // ~12.5 deg either side of the base roll
+const SPRINT_BOB_Y = 0.085;              // up/down amount of the gun while on tactical sprint
+const SPRINT_OFFHAND_PALM = { rollZ: -2.356 };   // off hand roll: palm half down, half right
+function sprintRecovering() { return sprintPose > 0.10; }   // the gun is still lowered / coming back from the sprint carry: no shooting or aiming yet
+function tacEase(x) { x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); }
+function tacSpeedMul() {
+  if (!tacState.on) return 1;
+  if (tacState.t <= TAC.hold) return TAC.speedMul;
+  return TAC.speedMul - (TAC.speedMul - 1) * Math.min(1, (tacState.t - TAC.hold) / TAC.fade);
+}
+function tacUpdate(dt, isSprinting) {
+  const nowMs = performance.now();
+  if (!isSprinting) { tacState.on = false; tacState.t = 0; }                       // stopping, crouching or reloading ends it
+  else if (nowMs - tacState.armedAt < TAC.armMs && gNow() >= tacState.cooldownUntil) {
+    tacState.on = true; tacState.t = 0; tacState.armedAt = -1e9;
+    tacState.cooldownUntil = gNow() + TAC.cooldownMs;
+  }   // double-tap: activate once, then wait 10 seconds before reusing
+  if (tacState.on) { tacState.t += dt; if (tacState.t >= TAC.hold + TAC.fade) { tacState.on = false; tacState.t = 0; } }
+  let styleT = 0, raiseT = GUN_POSE.sprintRaise;
+  if (tacState.on) {
+    const u = (tacState.t - TAC.hold) / TAC.fade;
+    if (u <= 0) { styleT = 1; raiseT = GUN_POSE_TAC.sprintRaise; }
+    else if (u < TAC.lowerFrac) {                                                  // 1) muzzle lowers until ~10 degrees from horizontal
+      styleT = 1; raiseT = GUN_POSE_TAC.sprintRaise + (TAC.levelPitch - GUN_POSE_TAC.sprintRaise) * tacEase(u / TAC.lowerFrac);
+    } else {                                                                       // 2) the gun rotates back into the normal sprint carry
+      const k = tacEase((u - TAC.lowerFrac) / (1 - TAC.lowerFrac));
+      styleT = 1 - k; raiseT = TAC.levelPitch + (GUN_POSE.sprintRaise - TAC.levelPitch) * k;
+    }
+  }
+  if (isSprinting) { const kk = Math.min(1, dt * 6); tacStyle += (styleT - tacStyle) * kk; tacRaise += (raiseT - tacRaise) * kk; }
+  else if (sprintPose < 0.02) { tacStyle = 0; tacRaise = GUN_POSE.sprintRaise; }  // otherwise the tactical carry is held while the gun comes down
+}
 const BASE_SENS = 0.0020;
 
 // Per-shot screen shake: a short, rapid jitter that fades out. Angles are in radians.
@@ -1083,14 +1151,17 @@ function applyPerformanceSettings() {
 // -----------------------
 const weapons = {
   1: { name: "AWP",          type: "sniper",  auto: false, fireRate: 1150, magSize: 5,  reloadMs: 2600, pellets: 1, spread: 0,      bodyDmg: 120, headDmg: 240, scope: true  },
-  2: { name: "M4A1",         type: "rifle",   auto: true,  fireRate: 75,   magSize: 30, reloadMs: 2000, pellets: 1, spread: 0.008,  bodyDmg: 18,  headDmg: 36,  scope: false },
+  2: { name: "M4A1",         type: "rifle",   auto: true,  fireRate: 75,   magSize: 30, reloadMs: 2000, pellets: 1, spread: 0.008,  bodyDmg: 22,  headDmg: 40,  scope: false },
   3: { name: "Mossberg 500", type: "shotgun", auto: false, fireRate: 760,  magSize: 8,  reloadMs: 2950, pellets: 9, spread: 0.062,  bodyDmg: 14,  headDmg: 22,  scope: false },
   4: { name: "Glock 17",     type: "pistol",  auto: false, fireRate: 240,  magSize: 17, reloadMs: 1250, pellets: 1, spread: 0.014,  bodyDmg: 36,  headDmg: 60,  scope: false },
-  5: { name: "MP5",          type: "smg",     auto: true,  fireRate: 70,   magSize: 30, reloadMs: 2100, pellets: 1, spread: 0.018,  bodyDmg: 16,  headDmg: 32,  scope: false },
+  5: { name: "MP5",          type: "smg",     auto: true,  fireRate: 70,   magSize: 30, reloadMs: 2100, pellets: 1, spread: 0.018,  bodyDmg: 19,  headDmg: 36,  scope: false },
   6: { name: "Combat Knife", type: "melee",   auto: false, fireRate: 330,  magSize: 0,  reloadMs: 0,    pellets: 1, spread: 0,      bodyDmg: 50,  headDmg: 80, range: 2.4, scope: false }
 };
 let curWeaponNum = 1;
-let current = { lastShot: -1e9 };
+let current = { lastShot: -1e9, lastShotPerf: -1e9 };
+let queuedSprintShot = false;
+let crosshairShotHit = false;
+let crosshairDynamicScale = 1;
 
 // Per-weapon ammo
 const ammoState = Object.fromEntries(Object.entries(weapons).map(([id, w]) =>
@@ -2873,7 +2944,7 @@ function updateHelpText() {
   const k = a => prettyKey(binds[a]);
   const weaponKeys=window.__fpsVersusActive?`${k("slot1")}/${k("slot2")}`:`${k("slot1")}/${k("slot2")}/${k("slot3")}`;
   el.textContent =
-    `Controls: ${k("forward")}${k("left")}${k("back")}${k("right")} move \u00B7 ${k("sprint")} sprint \u00B7 ${k("jump")} jump · ${k("crouch")} crouch \u00B7 ${k("slide")} slide \u00B7 ` +
+    `Controls: ${k("forward")}${k("left")}${k("back")}${k("right")} move \u00B7 ${k("sprint")} sprint (double-tap: tactical sprint) \u00B7 ${k("jump")} jump · ${k("crouch")} crouch \u00B7 ${k("slide")} slide \u00B7 ` +
     `LMB shoot \u00B7 RMB scope (AWP) \u00B7 ${k("reload")} reload \u00B7 Hold ${k("grenade")} + click to throw utility (still: right hand, moving: left) \u00B7 ${weaponKeys} weapons \u00B7 Wheel cycles · W/S climb/descend ladders · Esc menu · ${k("help")} hide this`;
 }
 
@@ -2893,8 +2964,11 @@ function crosshairHTML(s) {
     const D = Math.max(8, Math.round(s.size * 1.2));
     h += `<div class="ch-shape" style="position:absolute;left:50%;top:50%;width:${D}px;height:${D}px;transform:translate(-50%,-50%);border:${t}px solid ${c};border-radius:50%;box-sizing:border-box;${o}${op}"></div>`;
   }
-  h += el(0, 0, s.xLength, s.xThickness, s.xAngle, false, "ch-fire-x");
-  h += el(0, 0, s.xLength, s.xThickness, -s.xAngle, false, "ch-fire-x");
+  const fireGap = Math.max(4, Math.min(8, s.xLength * 0.35));
+  const fireSeg = s.xLength * 0.55;
+  for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+    h += el(sx * fireGap, sy * fireGap, fireSeg, s.xThickness, sx === sy ? s.xAngle : -s.xAngle, false, "ch-fire-x");
+  }
   if (s.style === "dot" || s.dot) h += el(0, 0, s.dotSize, s.dotSize, 0, true, "ch-dot");
   return h;
 }
@@ -2920,7 +2994,7 @@ function renderAccessibility() {
       ${sl("xLength", "Firing X length", 4, 32, 1, v => v + " px")}${sl("xThickness", "Firing X thickness", 0.5, 6, 0.5, v => v + " px")}${sl("xAngle", "Firing X angle from horizontal", 10, 80, 1, v => v + "°")}${sl("shootXDuration", "Firing X linger", 50, 500, 10, v => Math.round(v) + " ms")}
       ${sl("dotSize", "Dot size", 2, 12, 1, v => v + " px")}${sl("opacity", "Opacity", 0.2, 1, 0.05, v => Math.round(v * 100) + "%")}
       <label class="toggleRow"><input type="checkbox" data-chbool="dot"${s.dot ? " checked" : ""}> Centre dot <small>Add a dot to cross, T, X or circle</small></label>
-      <label class="toggleRow"><input type="checkbox" data-chbool="showXWhileShooting"${s.showXWhileShooting ? " checked" : ""}> Show only X while firing <small>Hide the four cross arms until the firing cue ends</small></label>
+      <label class="toggleRow"><input type="checkbox" data-chbool="showXWhileShooting"${s.showXWhileShooting ? " checked" : ""}> Show X on hit <small>Only target hits show the X; misses leave the centre dot</small></label>
       <label class="toggleRow"><input type="checkbox" data-chbool="outline"${s.outline ? " checked" : ""}> Black outline</label>
       <label class="toggleRow"><input type="checkbox" data-chbool="dynamic"${s.dynamic ? " checked" : ""}> Dynamic spread <small>Widens when you move or fire from the hip</small></label>
     </div><div id="chPreview" aria-label="Crosshair preview"></div></div>
@@ -2957,15 +3031,9 @@ function renderSights() {
 }
 
 function flashHitMarker(critical=false) {
-  if (!hitMarkerEl) return;
-  hitMarkerEl.classList.toggle("crit", !!critical);
-  hitMarkerEl.style.opacity = "1";
-  hitMarkerEl.style.transform = "translate(-50%, -50%) scale(1.05)";
-  setTimeout(() => {
-    hitMarkerEl.style.opacity = "0";
-    hitMarkerEl.style.transform = "translate(-50%, -50%) scale(0.95)";
-    hitMarkerEl.classList.remove("crit");
-  }, critical ? 110 : 85);
+  // Hit feedback now uses the small, separated X in the crosshair; no large screen X.
+  crosshairShotHit = true;
+  crosshairShootUntil = Math.max(crosshairShootUntil, gNow() + (settings.crosshair.shootXDuration || 150));
 }
 
 // -----------------------
@@ -3033,6 +3101,7 @@ function takeDamage(amount) {
 
 function updateSelfHeal(dt) {
   if (!roundActive || playerHP <= 0 || missionRun) return;       // missions: no regeneration, use medkits
+  if (window.__fpsVersusActive) return;                          // multiplayer: the server regenerates everyone at the same rate
   if (playerHP >= PLAYER_MAX_HP) return;
   if (gNow() - lastDamageTime < HEAL_DELAY * DIFF().healDelay) return;
   if (sprintActive()) return;   // no health regen while sprinting
@@ -3300,6 +3369,39 @@ function armHandShown(h) {
   return false;
 }
 // Runs once per frame, right before rendering, after every gun / reload / knife / throw / bob offset is applied.
+// Sprint: the gun hand is placed at a fixed LOW spot in camera space (so most of what you see is gun, not arm) and the off hand
+// is placed below the screen edge and rises into view with each step, then drops out again. Runs last, after every other offset. Tactical sprint only.
+const _hfA = new THREE.Vector3(), _hfB = new THREE.Vector3(), _hfM = new THREE.Matrix4();
+const _hfQ0 = new THREE.Quaternion(), _hfQ1 = new THREE.Quaternion(), _hfQ2 = new THREE.Quaternion(), _hfE = new THREE.Euler();
+const SPR_RH = { x: 0, y: -0.19, z: -0.58 }, SPR_RH_PISTOL = { y: -0.13, z: -0.52 }, SPR_LH = { x: -0.50, yHide: -0.95, yShow: -0.46, z: -0.66 };
+function sprintHandFix() {
+  if (!weaponGroup || typeof weaponModels === "undefined" || !weaponModels) return;
+  const mdl = weaponModels[curWeaponNum], su = mdl && mdl.userData;
+  if (!su || !su.rightHand || !su.leftHand) return;
+  const melee = weapons[curWeaponNum].type === "melee";
+  const spw = (melee || grenadeEquipped) ? 0 : sprintPose * (1 - slidePose) * (reloading ? 0 : 1) * tacStyle;   // tactical sprint only
+  if (spw < 0.01) { if (su._sprHand) { su.leftHand.position.copy(su.leftRest); if (su._sprRot) su.leftHand.rotation.copy(su._sprRot); su._sprHand = false; } return; }
+  if (!su._sprHand) su._sprRot = su.leftHand.rotation.clone();   // remember the normal grip rotation
+  su._sprHand = true;
+  const T = curWeaponNum === 4 ? SPR_RH_PISTOL : SPR_RH;
+  weaponGroup.updateMatrix(); mdl.updateMatrix();
+  _hfA.copy(su.rightHand.position).applyMatrix4(mdl.matrix).applyMatrix4(weaponGroup.matrix);   // gun hand, camera space
+  const bob = sprintWave(sprintPhY) * SPRINT_BOB_Y;
+  weaponGroup.position.y += (T.y + bob - _hfA.y) * spw;
+  weaponGroup.position.z += (T.z - _hfA.z) * spw;
+  weaponGroup.updateMatrix();
+  // off hand: absolute camera-space target, blended in from the normal grip
+  const k = sprintWave(sprintPhArm + 1.2, 0.10) * 0.5 + 0.5;   // 0 = below the screen, 1 = swung up into view; eases to a near-stop at both ends of each swing
+  _hfB.set(SPR_LH.x, SPR_LH.yHide + (SPR_LH.yShow - SPR_LH.yHide) * k, SPR_LH.z - 0.05 * k);
+  _hfA.copy(su.leftRest).applyMatrix4(mdl.matrix).applyMatrix4(weaponGroup.matrix).lerp(_hfB, spw);
+  _hfA.applyMatrix4(_hfM.copy(weaponGroup.matrix).invert()).applyMatrix4(_hfM.copy(mdl.matrix).invert());
+  su.leftHand.position.copy(_hfA);
+  // off hand orientation (camera space): fingers forward, palm facing half down / half to the right
+  _hfQ0.setFromEuler(_hfE.set(0, 0, SPRINT_OFFHAND_PALM.rollZ));
+  _hfQ1.copy(weaponGroup.quaternion).multiply(mdl.quaternion).invert().multiply(_hfQ0);   // into the hand's parent space
+  _hfQ2.setFromEuler(su._sprRot || su.leftHand.rotation).slerp(_hfQ1, spw);
+  su.leftHand.quaternion.copy(_hfQ2);
+}
 function updateViewArms() {
   if (!camera || !weaponGroup || typeof weaponModels === "undefined" || !weaponModels) return;
   if (!viewArms) { viewArms = new THREE.Group(); viewArms.name = "viewArms"; camera.add(viewArms); }
@@ -3538,7 +3640,7 @@ function buildSniperReload() {
 // Mossberg: left hand stays on the pump, right hand feeds shells in from the pouch one at a time, then racks the pump
 function buildShotgunReload(shells) {
   const T = RELOAD_TILT;
-  const n = Math.max(1, Math.min(5, shells));     // capped so each shell stays readable
+  const n = Math.max(1, Math.min(8, shells));     // one visible insert cycle for each missing shell
   const L = 0.70 / n, s = 0.10;
   const PORT  = { rx: 0.04, ry: 0.04, rz: -0.10, rrx: 0.2 };
   const POUCH = { rx: 0.24, ry: -0.24, rz: 0.14, rrx: -0.2 };
@@ -3595,15 +3697,15 @@ function updateFallingMags(dt) {
 }
 let reloadDur = 1, reloadLastP = 0, reloadFade = 0, reloadGunX = 0, reloadYawK = 0;
 
-function beginReloadAnimation(w, mag) {
+function beginReloadAnimation(w, mag, duration = w.reloadMs, shotgunShellCount = w.magSize - mag) {
   resetReloadParts(reloadModel);
   let r;
-  if (w.type === "shotgun") { r = buildShotgunReload(w.magSize - mag); reloadModel = shotgunModel; }
+  if (w.type === "shotgun") { r = buildShotgunReload(shotgunShellCount); reloadModel = shotgunModel; }
   else if (w.type === "sniper") { r = buildSniperReload(); reloadModel = awpModel; }
   else if (w.type === "rifle" || w.type === "smg") { r = buildMagReload(); reloadModel = weaponModels[curWeaponNum]; }
   else { r = buildRifleReload(); reloadModel = weaponModels[curWeaponNum]; }
   reloadKeys = r.keys; reloadEvents = r.events; reloadSpare = r.spare || null; reloadMagHide = r.magHide || null; reloadAnchor = !!r.anchor; reloadYawK = r.yawK || 0;
-  reloadDur = w.reloadMs; reloadLastP = 0; reloadFade = 1;
+  reloadDur = duration; reloadLastP = 0; reloadFade = 1;
 }
 
 function resetReloadParts(model) {
@@ -3700,7 +3802,7 @@ function applyReloadAnimation(dt) {
   }
   const su = weaponModels[curWeaponNum] && weaponModels[curWeaponNum].userData;   // sliding: off hand swings out to the side
   if (su && su.leftHand && curWeaponNum === 4 && !grenadeEquipped) {   // sprinting with the Glock: right hand carries it, the left arm pumps in and out of the screen
-    const spw = sprintPose * (1 - slidePose) * (reloading ? 0 : 1);
+    const spw = sprintPose * (1 - slidePose) * (reloading ? 0 : 1) * (1 - tacStyle);
     if (spw > 0.01) {
       const sw = Math.sin(stepTime * 0.9);
       su.leftHand.position.x -= 0.62 * spw; su.leftHand.position.y -= (0.22 + 0.04 * Math.abs(sw)) * spw; su.leftHand.position.z += (0.20 + 0.40 * sw) * spw;
@@ -8160,7 +8262,7 @@ function explodeVersusGrenade(pos) {
   const from = pos.clone(); from.y += 0.25;
   for (const player of latestPlayersSnapshot || []) {
     if (!player || player.id === multiplayerSocket.id || player.team === window.__fpsLocalTeam || player.alive === false || !player.position) continue;
-    const c = new THREE.Vector3(player.position.x, player.position.y + 1.05, player.position.z);
+    const c = new THREE.Vector3(player.position.x, player.position.y + versusSpheres(player.stance).upper[0] + 0.03, player.position.z);
     const d = c.distanceTo(pos);
     if (d > GRENADE.radius) continue;
     let damage = GRENADE.maxDmg * (1 - (1 - GRENADE.minFrac) * (d / GRENADE.radius));
@@ -9613,8 +9715,9 @@ function findVersusSnapshotHit(origin, direction, players, selfId, localTeam, ma
     if (!player || player.id === selfId || player.alive === false || !player.team ||
         player.team === localTeam || !player.position) continue;
     const p = player.position;
-    for (const [part, offsetY, radius] of [["head", 1.56, 0.24], ["body", 1.02, 0.46], ["body", 0.40, 0.34]]) {
-      const distance = raySphereHitDistance(origin, ray, { x: p.x, y: p.y + offsetY, z: p.z }, radius);
+    const sph = versusSpheres(player.stance), yw = player.aim?.yaw || 0, fwx = -Math.sin(yw), fwz = -Math.cos(yw);
+    for (const [part, [offsetY, radius, fwd]] of [["head", sph.head], ["body", sph.upper], ["body", sph.legs]]) {
+      const distance = raySphereHitDistance(origin, ray, { x: p.x + fwx * fwd, y: p.y + offsetY, z: p.z + fwz * fwd }, radius);
       if (distance === null || distance > maxDistance || (best && distance >= best.distance)) continue;
       best = { playerId: player.id, team: player.team, part, distance };
     }
@@ -9924,7 +10027,13 @@ function resolveKnifeAttack(isAlt) {
 
 function shoot() {
   if (!roundActive || reloading || swapping || grenadeEquipped) return;
-  if (sprintActive()) return;   // can't shoot while sprinting
+  if (sprintActive()) {
+    sprintCancelledByShot = true;
+    queuedSprintShot = true;
+    if (scoped) setScoped(false);
+    return;   // lower to hip-fire, then fire the queued trigger press
+  }
+  if (sprintRecovering() && weapons[curWeaponNum].type !== "melee") return;   // ...or while the gun is still coming back to the hip-fire position
   if (throwState) return;       // hands are busy throwing a grenade
 
   const w = weapons[curWeaponNum];
@@ -9937,14 +10046,19 @@ function shoot() {
   if (st.mag <= 0) { GunSFX.dryClick(); return; }
 
 
-  if (now - current.lastShot < w.fireRate) return;
+  const wallNow = performance.now();
+  const sinceLastShot = wallNow - current.lastShotPerf;
+  if (sinceLastShot < w.fireRate) return;
   current.lastShot = now;
+  // Keep automatic fire on its intended cadence instead of accumulating frame-time drift.
+  current.lastShotPerf = sinceLastShot > w.fireRate * 2.5 ? wallNow : current.lastShotPerf + w.fireRate;
   lastShotTime = now;
   lastShotPos.copy(camera.position);
 
   st.mag--; shots++;
   hipBloom = Math.min(1.2, hipBloom + 0.18);
   crosshairShootUntil = now + (settings.crosshair.shootXDuration || 150);
+  crosshairShotHit = false;
   GunSFX.fire(w.type === "pistol" ? "rifle" : w.type);   // the Glock cracks like the M4A1
 
   // recoil impulses
@@ -10054,9 +10168,12 @@ function startReload() {
   if (w.type === "melee" || st.mag >= w.magSize) return;
   if (missionRun && (st.reserve || 0) <= 0) { updateHUD("No spare ammo"); return; }
   reloading = true;
-  reloadEnd = gNow() + w.reloadMs;
+  const needed = w.magSize - st.mag;
+  const reloadCount = missionRun ? Math.min(needed, st.reserve || 0) : needed;
+  const reloadDuration = w.type === "shotgun" ? w.reloadMs * (reloadCount / w.magSize) : w.reloadMs;
+  reloadEnd = gNow() + reloadDuration;
   if (scoped) setScoped(false);            // lower the scope so the reload is visible
-  beginReloadAnimation(w, st.mag);
+  beginReloadAnimation(w, st.mag, reloadDuration, reloadCount);
   recoil = Math.max(recoil, 0.2);
   GunSFX.foley("handle");
   updateHUD("Reloading...");
@@ -10073,6 +10190,7 @@ function beginSwap(toWeapon) {
     updateWeaponModelVisibility();
   }
   if (toWeapon === curWeaponNum) return;
+  queuedSprintShot = false;
 
   // cancel reload/scope if swapping
   reloading = false;
@@ -10519,28 +10637,45 @@ function animateEnemy(enemy, dt) {
   // reload: support hand drops to the pouch, weapon cants up
   const reloading = !!ud.reloading && now < ud.reloadUntil;
   const rp = reloading ? Math.max(0, Math.min(1, (now - ud.reloadStart) / Math.max(1, ud.reloadUntil - ud.reloadStart))) : 0, rk = reloading ? Math.sin(rp * Math.PI) : 0;
+  // multiplayer avatars: crouch / slide / jump come from that player's reported stance
+  const rem = !!ud.remotePlayerId;
+  if (rem) {
+    const sn = ud.remoteStance || "stand";
+    r.stC = (r.stC || 0) + ((sn === "crouch" ? 1 : 0) - (r.stC || 0)) * Math.min(1, dt * 10);
+    r.stS = (r.stS || 0) + ((sn === "slide" ? 1 : 0) - (r.stS || 0)) * Math.min(1, dt * 9);
+    r.stA = (r.stA || 0) + ((sn === "air" ? 1 : 0) - (r.stA || 0)) * Math.min(1, dt * 12);
+  }
+  const stA = rem ? r.stA : 0;
   // slide into cover
-  const sk = Math.max(0, Math.min(520, (ud.slideUntil || 0) - now)) / 520;
+  const sk = rem ? r.stS : Math.max(0, Math.min(520, (ud.slideUntil || 0) - now)) / 520;
   const scanning = ud.state === "patrol" && now < (ud.patrolPause || 0);
   const crouch = ((ud.state === "reposition" && sp < 0.6) || ud.state === "cover") ? 1 : 0;
-  r.crouchK = (r.crouchK || 0) + (crouch - (r.crouchK || 0)) * Math.min(1, dt * 6);
+  r.crouchK = rem ? r.stC : (r.crouchK || 0) + (crouch - (r.crouchK || 0)) * Math.min(1, dt * 6);
   const ck = Math.max(r.crouchK, sk * 0.85);
+  const cHip = rem ? 0.95 : 0.75, cKnee = rem ? 1.75 : 1.35, cLean = rem ? 0.29 : 0.18;   // players squat deeper than the AI does
+  let footMax = 0;   // longest hip-to-sole vertical reach of either leg (used to keep a squatting avatar's feet on the floor)
 
   for (let i = 0; i < 2; i++) {
     const ph = p + i * Math.PI;
     const stride = (0.62 + run * 0.35) * (1 - Math.abs(strafe) * 0.45);
-    let hx = Math.sin(ph) * stride * amp - ck * 0.75 + (i ? 0.1 : -0.06) * (1 - amp) * br * 0.3 - 0.22 * (1 - ck);   // thighs a little forward
-    let kx = -Math.max(0, Math.cos(ph)) * (0.75 + run * 0.45) * amp + ck * 1.35 + 0.40 * (1 - ck);                   // knees slightly bent
+    let hx = Math.sin(ph) * stride * amp - ck * cHip + (i ? 0.1 : -0.06) * (1 - amp) * br * 0.3 - 0.22 * (1 - ck);   // thighs a little forward
+    let kx = -Math.max(0, Math.cos(ph)) * (0.75 + run * 0.45) * amp + ck * cKnee + 0.40 * (1 - ck);                   // knees slightly bent
     let hz = (i ? 1 : -1) * (0.03 + Math.abs(strafe) * 0.08) * (1 - ck) + strafe * Math.sin(ph) * 0.38 * amp * (1 - ck);   // side-stepping
     if (sk > 0) { hx += ((i === 0 ? -1.25 : -0.35) - hx) * sk; kx += ((i === 0 ? 0.06 : 1.7) - kx) * sk; hz *= (1 - sk); }  // lead leg out, trail leg folded
+    if (stA > 0.001) {   // jumping: knees tucked up, one leg leading
+      hx += ((i === 0 ? -1.0 : -0.5) - hx) * stA; kx += ((i === 0 ? 1.3 : 1.1) - kx) * stA; hz *= (1 - stA * 0.6);
+    }
     r.legs[i].hip.rotation.x = hx; r.legs[i].knee.rotation.x = kx; r.legs[i].hip.rotation.z = hz;
+    footMax = Math.max(footMax, 0.40 * Math.cos(hx) + 0.43 * Math.cos(hx + kx));
   }
-  r.model.position.y = -ck * 0.34 - 0.03 * (1 - ck) - sk * 0.10;      // bent knees lower the body a touch; squat to take cover behind low obstacles
+  r.model.position.y = -ck * 0.34 - 0.03 * (1 - ck) - sk * 0.10;
+  if (rem) { const w = Math.min(1, Math.max(r.stC, r.stS)); r.model.position.y = -0.03 + w * (footMax - 0.813); }   // lower the hips by exactly what the bent legs lose, so the feet stay on the floor      // bent knees lower the body a touch; squat to take cover behind low obstacles
   r.model.rotation.x = sk * 0.5;                                        // lean back into the slide
   r.upper.position.y = Math.abs(Math.sin(p)) * (0.025 + run * 0.03) * amp + Math.sin(p * 0.35) * 0.004 + br * 0.004 * (1 - amp);
   r.upper.rotation.z = Math.sin(p) * 0.025 * amp - strafe * 0.07 + Math.sin(t * 0.7) * 0.008 * (1 - amp) + r.bl * Math.sin(t * 3.1) * 0.09;
   r.upper.rotation.y = Math.sin(p) * 0.05 * amp - strafe * 0.05 + r.bl * Math.sin(t * 2.3) * 0.12;
-  r.upper.rotation.x = -(0.21 + run * 0.12 + ck * 0.18 + (engaged ? 0.03 : 0.0) + run * lowAmt * 0.08) + back * 0.02 + recoil * 0.04 + flinch * 0.12 + sk * 0.55 + rk * 0.05 + r.bl * 0.12;
+  r.upper.rotation.x = -(0.21 + run * 0.12 + ck * cLean + (engaged ? 0.03 : 0.0) + run * lowAmt * 0.08) + back * 0.02 + recoil * 0.04 + flinch * 0.12 + sk * 0.55 + rk * 0.05 + r.bl * 0.12;
+  if (stA > 0.001) r.upper.rotation.x += 0.10 * stA;   // a little more upright in the air
   const lean = r.upper.rotation.x;
   // lean about the hips (the torso's origin is at the feet, so a plain rotation swung the whole chest away from the legs)
   _uE.set(lean, r.upper.rotation.y, r.upper.rotation.z); _uQ.setFromEuler(_uE); _uO.copy(_uPv).applyQuaternion(_uQ).negate().add(_uPv);
@@ -12151,6 +12286,7 @@ function applyWeaponFeel(dt, isMoving, isSprinting) {
   // bob: based on movement
   const moveAmp = isMoving ? (isSprinting ? 1.0 : 0.65) : 0.2;
   stepTime += dt * (isSprinting ? 10.0 : 7.0) * moveAmp;
+  if (isSprinting && isMoving) { sprintPh += dt * SPRINT_BOB_RATE; sprintPhY += dt * SPRINT_BOB_Y_RATE; sprintPhArm += dt * SPRINT_ARM_RATE; }
 
   // sway: based on mouse movement is hard w/o raw values; emulate with a tiny oscillation + recoil
   gKnifeCalm += (((curWeaponNum === 6 && knifeAttackTimer > 0) ? 0 : 1) - gKnifeCalm) * Math.min(1, dt * 30);
@@ -12192,11 +12328,13 @@ function applyWeaponFeel(dt, isMoving, isSprinting) {
   if (curWeaponNum !== 1) { const d = adsFor(curWeaponNum); ax = -d[0] * kAds; ay = -d[1] * kAds - ADS_DROP; az = -(weapons[curWeaponNum].type === "pistol" ? 1.12 : 0.80) - d[2] * kAds; }
   const pist = w.type === "pistol", hs = pist ? 1.05 : HIP_SCALE;
   const closeF = 1 - (1 - GUN_CLOSE) * (1 - scopeZ);   // 1 when aimed, GUN_CLOSE at the hip
-  weaponGroup.scale.setScalar((hs + (kAds - hs) * scopeZ) * closeF * (1 + 0.35 * sprintPose * (1 - slidePose)));   // held closer and bigger while sprinting
+  const TW = (w.type === "melee") ? 0 : tacStyle;   // how tactical the sprint carry is (knives always use the normal one)
+  const mixT = (a, b) => a + (b - a) * TW;
+  weaponGroup.scale.setScalar((hs + (kAds - hs) * scopeZ) * closeF * (1 + 0.35 * (1 - TW) * sprintPose * (1 - slidePose)));   // held closer and bigger while sprinting (normal sprint only)
   const spE = sprintPose * (1 - slidePose);   // the sprint carry fades out while sliding
-  const hipX = pist ? -0.02 + 0.22 * spE : (curWeaponNum === 1 ? 0.17 : 0.08) - ((curWeaponNum === 1 ? 0.17 : 0.08) - 0.03) * spE + 0.05 * spE + GUN_POSE.sprintSide * spE + 0.03 * (1 - spE);   // nearer the middle when walking, held a little further out to the right
+  const hipX = (pist ? -0.02 + 0.22 * spE : (curWeaponNum === 1 ? 0.17 : 0.08) - ((curWeaponNum === 1 ? 0.17 : 0.08) - 0.03) * spE + 0.05 * spE + GUN_POSE.sprintSide * spE + 0.03 * (1 - spE)) - 0.12 * spE;   // shift the gun and attached arms slightly left while sprinting
   const HOLD_UP = -0.03 * (1 - spE) + 0.07 * spE;   // hip: carried low, like a low-ready stance   // carried high on screen
-  const hipY = HOLD_UP + (pist ? -0.11 - 0.09 * spE : 0.0 - (curWeaponNum === 1 ? GUN_POSE.sprintLower : 0.035) * spE);
+  const hipY = HOLD_UP + (pist ? -0.11 - 0.09 * spE : 0.0 - (curWeaponNum === 1 ? mixT(GUN_POSE.sprintLower, GUN_POSE_TAC.sprintLower) : mixT(0.035, GUN_POSE_TAC.sprintLowerOther)) * spE);
   const targetX = hipX + (ax - hipX) * scopePose;
   const targetY = hipY + (ay - hipY) * scopePose;
   const hipZ = (pist ? -0.40 - 0.10 * spE : (curWeaponNum === 1 ? -0.08 : -0.12) - 0.20 * spE) - 0.06 * (1 - spE);   // pushed well forward so the near end of the gun (scope eyepiece, stock) is not right in front of the camera   // sprinting pushes the gun a long way out in front
@@ -12210,7 +12348,8 @@ function applyWeaponFeel(dt, isMoving, isSprinting) {
   gunFlipVis += (gunFlip - gunFlipVis) * Math.min(1, dt * 55);
 
   // sprint pose blends in/out smoothly; not while scoped or reloading (the reload pose needs the gun up)
-  sprintPose += ((isSprinting && !scoped && !reloading ? 1 : 0) - sprintPose) * Math.min(1, dt * 9);
+  { const spT = (isSprinting && !scoped && !reloading) ? 1 : 0;   // leaving the tactical carry takes longer than leaving the normal one
+    sprintPose += (spT - sprintPose) * Math.min(1, dt * (spT ? 9 : TAC.normalExitRate + (TAC.exitRate - TAC.normalExitRate) * tacStyle)); }
   const aimK = (1 - spE) * (1 - scopePose) * (pist ? 0 : 1);   // pistol points straight down the view, no cant  // fade hip-fire cant as the optic aligns with the view
   const freePose = 1 - scopePose;
   const tl = ladderBlend, tg = throwGunLower();   // tl: gun drops out of the way on a ladder; tg: gun slides to the right while the left hand throws
@@ -12218,11 +12357,12 @@ function applyWeaponFeel(dt, isMoving, isSprinting) {
   weaponGroup.position.y = targetY + recoil * kickY * freePose + swayY * adsMul * freePose * (1 - hipFireK) - 0.45 * tl * freePose - 0.10 * tg * freePose - 0.17 * slidePose * freePose;
   weaponGroup.position.z = targetZ + recoil * kickZ * freePose + Math.abs(swayX) * 0.6 * adsMul * freePose + 0.2 * tl * freePose + 0.06 * tg * freePose;
   const hipPitch = (pist || w.type === "melee") ? 0 : HIP_PITCH * (1 - spE);
-  weaponGroup.rotation.x = ((recoil * kickRot + gunFlipVis * flipAmt) + (swayX * 0.8 * adsMul) + hipPitch + GUN_AIM_PITCH * 0.1 * aimK + (pist ? -0.12 : GUN_POSE.sprintRaise) * spE + 0.6 * tl + 0.10 * tg) * freePose;
-  weaponGroup.rotation.y = (swayX * 0.35 * adsMul + GUN_AIM_YAW * 0.2 * aimK + (pist ? 0.30 : GUN_POSE.sprintYaw) * spE + ((pist || w.type === "melee") ? 0 : GUN_POSE.hipYaw * (1 - spE))) * freePose;
-  weaponGroup.rotation.z = ((pist ? -0.12 : GUN_POSE.sprintRoll) * spE - gStrafe * 0.24 * (1 - scopeBlend)) * freePose;
+  weaponGroup.rotation.x = ((recoil * kickRot + gunFlipVis * flipAmt) + (swayX * 0.8 * adsMul) + hipPitch + GUN_AIM_PITCH * 0.1 * aimK + (pist ? -0.12 : (w.type === "melee" ? GUN_POSE.sprintRaise : tacRaise)) * spE + 0.6 * tl + 0.10 * tg) * freePose;
+  weaponGroup.rotation.y = (swayX * 0.35 * adsMul + GUN_AIM_YAW * 0.2 * aimK + (pist ? 0.30 : mixT(GUN_POSE.sprintYaw, GUN_POSE_TAC.sprintYaw)) * spE + ((pist || w.type === "melee") ? 0 : GUN_POSE.hipYaw * (1 - spE))) * freePose;
+  weaponGroup.rotation.z = ((pist ? -0.12 : mixT(GUN_POSE.sprintRoll, GUN_POSE_TAC.sprintRoll)) * spE - gStrafe * 0.24 * (1 - scopeBlend)) * freePose;
   gAimRoll = (curWeaponNum === 1 || scopePose <= 0) ? 0 : -gStrafe * 0.17 * scopePose;
   weaponGroup.rotation.z += gAimRoll - 0.16 * tg * freePose;   // rolls slightly toward the direction you strafe, like a held rifle seen from behind
+  if (spE > 0.01 && TW > 0.001 && !pist) weaponGroup.rotation.z += sprintWave(sprintPh) * SPRINT_TILT * spE * freePose * TW;   // tactical sprint: the magazine rocks from left to centre
   if (curWeaponNum !== 1) { weaponGroup.position.z += recoil * 0.22 * scopePose; weaponGroup.rotation.x += recoil * 0.035 * scopePose; }   // a bit more kick while aimed
 
   if (knifeSpinPivot) {
@@ -12283,6 +12423,8 @@ function addEventListeners() {
       // release everything so keys/buttons can't get stuck while the menu is open
       if (scoped) setScoped(false);
       for (const k in keys) keys[k] = false;
+      sprintCancelledByShot = false;
+      queuedSprintShot = false;
       mouseDown = false;
       jumpQueued = false;
       if (roundActive && window.__fpsVersusActive) window.dispatchEvent(new Event("fps-versus-pause"));
@@ -12334,7 +12476,7 @@ function addEventListeners() {
     if (e.button === 2) {
       if (grenadeEquipped) { if (keys[normCode(binds.grenade)]) tryThrowGrenade("under"); return; }
       if (weapons[curWeaponNum].type === "melee") startKnifeAttack(true);
-      else if (!sprintActive() && !reloading) setScoped(true);
+      else if (!sprintActive() && !sprintRecovering() && !reloading) setScoped(true);   // only aim once the gun is back at the hip
     }
   });
 
@@ -12350,6 +12492,11 @@ function addEventListeners() {
     if (!locked) return;
     const code = normCode(e.code);
     keys[code] = true;
+    if (code === binds.sprint && !e.repeat) {   // double-tap sprint = tactical sprint
+      const tn = performance.now();
+      if (tn - tacState.lastTap < TAC.tapMs && gNow() >= tacState.cooldownUntil) tacState.armedAt = tn;
+      tacState.lastTap = tn;
+    }
 
     for (let i = 0; i < hotbar.length; i++) {
       if (hotbar[i] !== null && code === binds["slot" + (i + 1)]) setWeapon(hotbar[i]);
@@ -12377,6 +12524,7 @@ function addEventListeners() {
     const code = normCode(e.code);
     keys[code] = false;
     if (code === binds.jump) jumpQueued = false;
+    if (code === binds.sprint) sprintCancelledByShot = false;
     if (code === normCode(binds.grenade) && grenadeEquipped && !throwState) setGrenadeEquipped(false);
   });
 
@@ -12627,10 +12775,11 @@ function animate(timestamp) {
   const isMoving = (mx !== 0 || mz !== 0);
   const isSprinting = !activeLadder && sprintActive();
   if (isSprinting && scoped) setScoped(false);   // sprinting drops the scope
+  tacUpdate(dt, isSprinting);                    // tactical sprint timer / pose
 
-  let speed = isSprinting ? 10.4 : 7.6; // another ~5% slower sprint; walking remains 20% slower
+  let speed = (isSprinting ? 10.4 * tacSpeedMul() : 7.6) * MOVE_SPEED_MUL;
   if (scoped) speed *= 0.8;
-  if (missionRun && missionRun.chute) speed = Math.min(speed, CHUTE_SPEED);   // you can only drift under the canopy
+  if (missionRun && missionRun.chute) speed = Math.min(speed, CHUTE_SPEED * MOVE_SPEED_MUL);   // 10% slower drift under the canopy
   if (reloading) speed *= RELOAD_SPEED_MUL;     // slower while reloading
   if (crouchHeld()) speed *= CROUCH.speedMul;   // slower while crouched
   if (slideState.want) { slideState.want = false; if (isSprinting && PLAYER.grounded && slideState.t <= 0 && slideState.cd <= 0 && !scoped && len > 0) { slideState.t = SLIDE.dur; slideState.dx = mx; slideState.dz = mz; GunSFX.foley("slide"); } }
@@ -12638,7 +12787,7 @@ function animate(timestamp) {
   let sliding = false;
   if (slideState.t > 0 && PLAYER.grounded && !activeLadder) {
     slideState.t -= dt; const sk = Math.max(0, slideState.t / SLIDE.dur);
-    mx = slideState.dx; mz = slideState.dz; speed = 10.4 + SLIDE.boost * sk; sliding = true;
+    mx = slideState.dx; mz = slideState.dz; speed = (10.4 + SLIDE.boost * sk) * MOVE_SPEED_MUL; sliding = true;
     if (slideState.t <= 0) slideState.cd = 1.5;   // 1.5 s before you can slide again
   } else if (slideState.t > 0) { slideState.t = 0; slideState.cd = 1.5; }
 
@@ -12705,7 +12854,7 @@ function animate(timestamp) {
   if (activeLadder) {
     const climbDir = keys[binds.forward] ? 1 : keys[binds.back] ? -1 : 0;
     const feet = camera.position.y - curEye;
-    const vN = climbDir > 0 ? 3.2 : 4.0, prevPh = ladderPhase;   // average speed up / down, in m/s
+    const vN = (climbDir > 0 ? 3.2 : 4.0) * MOVE_SPEED_MUL, prevPh = ladderPhase;   // average climb speed, in m/s (10% slower)
     if (climbDir !== 0) ladderPhase += dt * vN / 0.30;           // one hand-over-hand cycle per rung
     const pulse = 0.5 - 0.5 * Math.cos(2 * Math.PI * ladderPhase);   // pull, release, reach: speed rises and falls with each rung
     const nextFeet = clamp(feet + climbDir * vN * (0.35 + 1.3 * pulse) * dt, activeLadder.baseY, activeLadder.topY);
@@ -12763,6 +12912,10 @@ function animate(timestamp) {
   gunFlip = Math.max(0, gunFlip - dt * (w.auto ? 16 : 9));
 
   // auto fire
+  if (queuedSprintShot && locked && roundActive && !sprintActive() && (!sprintRecovering() || weapons[curWeaponNum].type === "melee")) {
+    queuedSprintShot = false;
+    shoot();
+  }
   if (mouseDown && locked && w.auto && roundActive) shoot();
 
   // tactical AI updates
@@ -12817,11 +12970,13 @@ function animate(timestamp) {
     const kk = Math.min(1, rawDt * 11);
     gSwayX += (tx - gSwayX) * kk; gSwayY += (ty - gSwayY) * kk;
     const chEl = animate._ch || (animate._ch = document.getElementById("crosshair"));
-    const dyn = settings.crosshair.dynamic ? 1 + hipBloom * 0.5 * (1 - scopeBlend) + (isMoving ? 0.2 : 0) : 1;
+    const dynTarget = settings.crosshair.dynamic ? 1 + hipBloom * 0.9 * (1 - scopeBlend) + (isMoving ? 0.35 : 0) : 1;
+    crosshairDynamicScale += (dynTarget - crosshairDynamicScale) * (1 - Math.exp(-rawDt * 12));
     if (chEl) {
-      chEl.style.setProperty("--ch-scale", dyn.toFixed(3));
-      chEl.classList.toggle("show-fire-x", !!settings.crosshair.showXWhileShooting);
-      chEl.classList.toggle("shooting", !!settings.crosshair.showXWhileShooting && crosshairShootUntil > gNow());
+      chEl.style.setProperty("--ch-scale", crosshairDynamicScale.toFixed(3));
+      const cueActive = crosshairShootUntil > gNow();
+      chEl.classList.toggle("shooting-miss", cueActive && !crosshairShotHit);
+      chEl.classList.toggle("shooting-hit", cueActive && crosshairShotHit && !!settings.crosshair.showXWhileShooting);
     }
   }
 
@@ -12851,7 +13006,7 @@ function animate(timestamp) {
   const bobbing = settings.viewBob && running && isMoving && PLAYER.grounded;
   const bobTarget = bobbing ? (isSprinting ? VIEW_BOB.sprintAmt : VIEW_BOB.walkAmt) : 0;
   viewBobAmt += (bobTarget - viewBobAmt) * Math.min(1, rawDt * 10);
-  if (bobbing) viewBobPhase += dt * (isSprinting ? VIEW_BOB.sprintFreq : VIEW_BOB.walkFreq);
+  if (bobbing) viewBobPhase += dt * (isSprinting ? VIEW_BOB.sprintFreq + (9.84 - VIEW_BOB.sprintFreq) * tacStyle : VIEW_BOB.walkFreq);
   const bobMul = viewBobAmt * (curWeaponNum === 1 && !grenadeEquipped ? 1 - scopeBlend : 1 - 0.55 * scopeBlend);  // settle the view as the optic comes up (the AWP scope is dead steady)
   // vertical only: the camera moves straight up and down, no side-to-side or tilt
   const bobBase = _bobBase.copy(camera.position), bobRotX = camera.rotation.x, bobRotZ = camera.rotation.z;
@@ -12878,19 +13033,20 @@ function animate(timestamp) {
     const gunV = Math.sin(viewBobPhase * 2 - 0.7);          // vertical, 2x frequency
     const gunH = Math.sin(viewBobPhase - 0.4);              // horizontal, 1x frequency
     const gunF = Math.cos(viewBobPhase * 2 - 0.7);          // forward/back, 90 degrees out of step with vertical
-    gunSideOff = gunH * VIEW_BOB.gunSide * m * (1 - scopeBlend) * (1 + 1.1 * gunSprintBlend);   // no sideways drift while aiming
-    gunSideOff += gunH * VIEW_BOB.gunSprintSide * gunSprintBlend * bobMul * settings.viewBobIntensity * settings.gunBobIntensity * gKnifeCalm * (1 - slidePose) * (1 - scopeBlend);   // sprint: swings clearly side to side
+    const TB = (weapons[curWeaponNum].type === "melee") ? 0 : tacStyle;   // tactical sprint has its own bob (tilt + hand placement), so the generic sprint swing fades out
+    gunSideOff = gunH * VIEW_BOB.gunSide * m * (1 - scopeBlend) * ((1 + 1.1 * gunSprintBlend) * (1 - TB) + (1 - gunSprintBlend) * TB);   // no sideways drift while aiming
+    gunSideOff += (1 - TB) * gunH * VIEW_BOB.gunSprintSide * gunSprintBlend * bobMul * settings.viewBobIntensity * settings.gunBobIntensity * gKnifeCalm * (1 - slidePose) * (1 - scopeBlend);   // sprint: swings clearly side to side
     gunSideOff -= gStrafe * VIEW_BOB.gunStrafe * gKnifeCalm * (1 - slidePose) * (1 - scopeBlend);   // strafing: the gun swings the other way
     hipFireK += (((gNow() - lastShotTime < (weapons[curWeaponNum].type === "pistol" ? 1000 : 380) && scopeBlend < 0.3 && !isSprinting && weapons[curWeaponNum].type !== "melee") ? 1 : 0) - hipFireK) * Math.min(1, rawDt * 12);
-    weaponGroup.position.y += gunV * VIEW_BOB.gunHeight * m * (1 - hipFireK) * (1 - scopeBlend) * (1 - 0.65 * gunSprintBlend);   // sprinting swings the gun across more than up and down
+    weaponGroup.position.y += gunV * VIEW_BOB.gunHeight * m * (1 - hipFireK) * (1 - scopeBlend) * ((1 - 0.65 * gunSprintBlend) * (1 - TB) + (1 - gunSprintBlend) * TB);   // sprinting swings the gun across more than up and down
     weaponGroup.position.x -= 0.09 * hipFireK;
     weaponGroup.position.x += gunSideOff;
-    weaponGroup.position.z += gunF * VIEW_BOB.gunForward * m * (1 - scopeBlend);
+    weaponGroup.position.z += gunF * VIEW_BOB.gunForward * m * (1 - scopeBlend) * (1 - gunSprintBlend * TB);
     const kScope = Math.max(0.05, 1 - 0.95 * scopeBlend);
     const mRot = aimOn ? (m / kScope) * (1 - 0.2 * scopeBlend) : m;   // the tilt keeps (almost) full strength while aimed
-    weaponGroup.rotation.x += gunV * VIEW_BOB.gunPitch * mRot * (1 - hipFireK) * (1 - scopeBlend);
-    const steady = 0.4 + 0.6 * gunSprintBlend;                // walking keeps the aim steadier; sprinting swings freely
-    weaponGroup.rotation.y += gunH * VIEW_BOB.gunYaw * mRot * steady * (1 - scopeBlend) * (1 + 0.8 * gunSprintBlend);
+    weaponGroup.rotation.x += gunV * VIEW_BOB.gunPitch * mRot * (1 - hipFireK) * (1 - scopeBlend) * (1 - gunSprintBlend * TB);
+    const steady = (0.4 + 0.6 * gunSprintBlend) * (1 - TB) + 0.4 * (1 - gunSprintBlend) * TB;                // walking keeps the aim steadier; sprinting swings freely (tactical: no yaw bob)
+    weaponGroup.rotation.y += gunH * VIEW_BOB.gunYaw * mRot * steady * (1 - scopeBlend) * ((1 + 0.8 * gunSprintBlend) * (1 - TB) + TB);
     const sw = settings.gunSway * 0.7 * gKnifeCalm * Math.max(0, 1 - 1.5 * scopeBlend) * (1 - 0.6 * sprintPose);   // zero by the time the sight is lined up, so aiming is never delayed by turning
     weaponGroup.rotation.y += gSwayX * 1.4 * sw; weaponGroup.rotation.x += gSwayY * 1.2 * sw; weaponGroup.rotation.z -= gSwayX * 0.9 * sw * (curWeaponNum === 1 ? 1 - scopeBlend : 1);
     if (weapons[curWeaponNum].type !== "melee") weaponGroup.rotation.z -= gSwayX * (curWeaponNum === 1 ? 1.5 * (1 - scopeBlend) : 1.5 - 0.6 * scopeBlend) * gKnifeCalm;   // turning the camera rolls the gun the same way strafing does, hip or aimed
@@ -12925,6 +13081,7 @@ function animate(timestamp) {
   }
 
   if (skyGroup) skyGroup.position.copy(camera.position);   // sky, stars and sun/moon stay centred on the player
+  sprintHandFix();
   updateViewArms();
   renderScopePreview();
   renderWithViewmodel();
@@ -12961,8 +13118,8 @@ initDeathScreen();
     });
     const remoteHitGeometries = {
       head: new THREE.SphereGeometry(0.20, 12, 8),
-      torso: new THREE.BoxGeometry(0.58, 0.88, 0.38),
-      legs: new THREE.BoxGeometry(0.46, 0.62, 0.34),
+      torso: new THREE.BoxGeometry(0.58, 0.88, 0.38),   // ~radius 0.46 when scaled by versusSpheres()
+      legs: new THREE.BoxGeometry(0.46, 0.62, 0.34),    // ~radius 0.34
     };
     let latestPlayersSnapshot = [];
     let lobbyPlayerSnapshots = [];
@@ -12996,16 +13153,19 @@ initDeathScreen();
       group.userData.maxHp = Number.isFinite(PLAYER_MAX_HP) && PLAYER_MAX_HP > 0 ? PLAYER_MAX_HP : 100;
       // Keep collision proxies visible to THREE.Raycaster while rendering
       // nothing; this makes hits independent of the detailed animated rig.
-      for (const [part, geometry, y] of [
-        ["head", remoteHitGeometries.head, 1.56],
-        ["body", remoteHitGeometries.torso, 1.02],
-        ["body", remoteHitGeometries.legs, 0.40],
+      group.traverse((o) => { if (o.isMesh && o.visible === false) o.raycast = () => {}; });   // the rig's own fixed-size hit volumes would ignore crouching / sliding
+      group.userData.hitMeshes = {};
+      for (const [key, part, geometry, y] of [
+        ["head", "head", remoteHitGeometries.head, 1.56],
+        ["upper", "body", remoteHitGeometries.torso, 1.02],
+        ["legs", "body", remoteHitGeometries.legs, 0.40],
       ]) {
         const hitbox = new THREE.Mesh(geometry, remoteHitMaterial);
         hitbox.position.y = y;
         hitbox.userData.part = part;
         hitbox.userData.remoteHitbox = true;
         group.add(hitbox);
+        group.userData.hitMeshes[key] = hitbox;
       }
       group.userData.vel.set(0, 0, 0);
       group.userData.state = "engage";
@@ -13152,6 +13312,8 @@ initDeathScreen();
       updateLobbyInterface();
       if (!scene) return;
 
+      { const me = lobbyPlayerSnapshots.find((q) => q.id === multiplayerSocket.id);   // server-side regeneration: only ever raises our hp here (damage arrives via lobby:state)
+        if (me && window.__fpsVersusActive && roundActive && me.alive !== false && Number.isFinite(me.hp) && me.hp > playerHP) { playerHP = me.hp; updatePlayerHealthBar(); } }
       const visiblePlayerIds = new Set();
       const playerById = new Map();
       for (const player of lobbyPlayerSnapshots) {
@@ -13188,6 +13350,7 @@ initDeathScreen();
         else avatar.target.copy(nextPos);
         avatar.targetYaw = playerYaw;
         avatar.group.userData.remotePitch = playerPitch;
+        avatar.group.userData.remoteStance = player.stance || "stand";
         avatar.group.userData.remotePlayerId = playerId;
         const wasAlive = avatar.group.userData.alive !== false && !avatar.group.userData.dying;
         const previousHp = avatar.group.userData.hp;
@@ -13241,6 +13404,16 @@ initDeathScreen();
           g.userData.vel.x += ((g.position.x - px) / dt - g.userData.vel.x) * vk;
           g.userData.vel.z += ((g.position.z - pz) / dt - g.userData.vel.z) * vk;
           if (!g.userData.dying) { try { animateEnemy(g, dt); } catch (e) {} }
+          const hm = g.userData.hitMeshes;
+          if (hm) {   // move / shrink the hit volumes with the stance
+            const sph = versusSpheres(g.userData.remoteStance), hk = 1 - Math.exp(-dt * 16);
+            for (const [key, base] of [["head", 0.20], ["upper", 0.46], ["legs", 0.34]]) {
+              const m = hm[key], [hy, hr, hf] = sph[key], sc = hr / base;
+              m.position.y += (hy - m.position.y) * hk;
+              m.position.z += (-hf - m.position.z) * hk;
+              const ns = m.scale.x + (sc - m.scale.x) * hk; m.scale.setScalar(ns);
+            }
+          }
         }
         requestAnimationFrame(frame);
       }
@@ -13392,6 +13565,8 @@ initDeathScreen();
           z: camera.position.z,
         },
         aim: { yaw, pitch },
+        stance: localStance(),
+        sprint: !!(roundActive && sprintActive()),
       });
     }, 50);
   </script>
@@ -14172,7 +14347,7 @@ body.mpNav #hud{top:204px}
     const zMid=(currentBounds.zMin+currentBounds.zMax)/2;
     yaw=Math.atan2(sx,-(zMid-sz));pitch=0;
     playerHP=cfg.health;updatePlayerHealthBar();overlayEl.style.display="none";hide();renderHud(state);
-    multiplayerSocket.emit("player:update",{position:{x:sx,y:sy,z:sz},aim:{yaw,pitch}});
+    multiplayerSocket.emit("player:update",{position:{x:sx,y:sy,z:sz},aim:{yaw,pitch},stance:"stand",sprint:false});
     setTimeout(()=>requestLock(),100);
   }
 
